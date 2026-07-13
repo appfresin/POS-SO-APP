@@ -1,0 +1,14 @@
+{
+  "cleanUrls": true,
+  "trailingSlash": true,
+  "rewrites": [
+    {
+      "source": "/pos",
+      "destination": "/pos/"
+    },
+    {
+      "source": "/self-order",
+      "destination": "/self-order/"
+    }
+  ]
+}
