@@ -281,6 +281,8 @@ function dashboardOrderItem(order) {
   const shortNumber = displayOrderNumber(order.number);
   const label = dashboardStatusLabel(order.status);
   const className = dashboardStatusClass(order.status);
+  const customer = String(order.customer || "").trim();
+  const title = customer ? `${order.type} - ${customer}` : String(order.type || "");
   const cancelInfo = order.status === "Dibatalkan"
     ? `<small class="dashboard-order-cancel-note">${escapeHtml(order.cancelReason || "Tidak ada keterangan pembatalan.")}</small>`
     : "";
@@ -289,7 +291,7 @@ function dashboardOrderItem(order) {
       <span class="dashboard-order-token">${escapeHtml(shortNumber)}</span>
       <div class="dashboard-order-main">
         <div class="dashboard-order-line">
-          <strong>${escapeHtml(order.type)} - ${escapeHtml(order.customer || "Walk-in")}</strong>
+          <strong>${escapeHtml(title)}</strong>
           <small>${money(orderTotal(order))}</small>
         </div>
         ${cancelInfo}

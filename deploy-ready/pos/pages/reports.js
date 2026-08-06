@@ -247,7 +247,7 @@ function renderReports() {
                   <strong>${money(largestPurchase.total)}</strong>
                 </span>
                 <div>
-                  <b>${escapeHtml(largestPurchase.customer || "Walk-in")}</b>
+                  <b>${escapeHtml(String(largestPurchase.customer || "").trim())}</b>
                   <em>${escapeHtml(largestPurchase.type || "-")} - ${dateTime(largestPurchase.paidAt || largestPurchase.createdAt)}</em>
                 </div>
                 <i>&rarr;</i>
@@ -533,7 +533,7 @@ async function openReportVisitorReceipt(eventOrRecordKey, maybeRecordKey) {
         </div>
         <div class="visitor-receipt-chips">
           <span>${escapeHtml(order.type || "-")}</span>
-          <span>${escapeHtml(order.customer || "Walk-in")}</span>
+          <span>${escapeHtml(String(order.customer || "").trim())}</span>
           <span>${escapeHtml(order.paymentMethod || "-")}</span>
         </div>
         <div class="visitor-receipt-items">
@@ -1215,7 +1215,7 @@ function renderProfitLossDrill() {
       profit: record.profit,
       estimatedCost: Math.max(0, Number(record.total || 0) - Number(record.profit || 0)),
       type: record.type || "-",
-      customer: record.customer || "Walk-in",
+      customer: String(record.customer || "").trim(),
       paymentMethod: record.paymentMethod || "Belum dipilih",
       hint: dateTime(record.paidAt || record.createdAt),
       createdAt: record.createdAt,
@@ -1300,7 +1300,7 @@ function renderProfitLossDrill() {
       profit: record.profit,
       estimatedCost: Math.max(0, Number(record.total || 0) - Number(record.profit || 0)),
       type: record.type || "-",
-      customer: record.customer || "Walk-in",
+      customer: String(record.customer || "").trim(),
       paymentMethod: record.paymentMethod || "Belum dipilih",
       hint: dateTime(record.paidAt || record.createdAt),
       createdAt: record.createdAt,
@@ -1337,7 +1337,7 @@ function renderProfitLossDrill() {
             <small>Pendapatan</small>
             <strong class="profit-drill-metric-value">${money(bucket.total)}</strong>
             <small class="profit-drill-sub-label">Pelanggan</small>
-            <strong class="profit-drill-metric-value">${escapeHtml(bucket.customer || "Walk-in")}</strong>
+            <strong class="profit-drill-metric-value">${escapeHtml(String(bucket.customer || "").trim())}</strong>
           </span>
           <span class="profit-drill-metric">
             <small>Keuntungan</small>

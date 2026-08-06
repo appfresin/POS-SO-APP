@@ -2414,6 +2414,16 @@ function supabaseWritable() {
   return Boolean(supabaseClient);
 }
 
+function customerDisplayName(customer) {
+  return String(customer || "").trim();
+}
+
+function orderDisplayTitle(order) {
+  const number = displayOrderNumber(order?.number);
+  const customer = customerDisplayName(order?.customer);
+  return customer ? `${number} - ${customer}` : number;
+}
+
 function userFacingError(message) {
   return Object.assign(new Error(message), { userMessage: message });
 }
@@ -3893,7 +3903,7 @@ async function syncOrderToSupabase(order, options = {}) {
       order_number: order.number,
       source: order.source || "Kasir",
       type: order.type || "Dine In",
-      customer_name: order.source === "Self Order" ? (order.customer || "") : (order.customer || "Walk-in"),
+      customer_name: order.customer || "",
       service_info: order.serviceInfo || "-",
       note: order.note || "",
       status: order.status || "Pesanan Baru",
@@ -4797,7 +4807,7 @@ function normalizeSupabaseLiveOrder(orderRow, itemRows = [], addonsByItemId = ne
     number: orderRow.order_number,
     source: orderRow.source || "Kasirin!",
     type: orderRow.type || "Dine In",
-    customer: orderRow.source === "Self Order" ? (orderRow.customer_name || "") : (orderRow.customer_name || "Walk-in"),
+    customer: orderRow.customer_name || "",
     serviceInfo: orderRow.service_info || "-",
     note: orderRow.note || "",
     status: orderRow.status || "Pesanan Baru",
@@ -6819,7 +6829,7 @@ function receiptDemoOrder() {
     id: "demo-receipt",
     number: "ORD-DEMO-001",
     type: "Dine In",
-    customer: "Walk-in",
+    customer: "",
     serviceInfo: "A1",
     paymentMethod: "Tunai",
     receivedAmount: 50000,
@@ -10177,7 +10187,7 @@ async function clearCart() {
 
 async function holdOrder() {
   if (!cart.length) return toast("Keranjang masih kosong.");
-  const customer = sessionStorage.getItem("pos_customer_name") || "Walk-in";
+  const customer = customerDisplayName(sessionStorage.getItem("pos_customer_name"));
   const held = {
     id: uid(),
     name: customer,
@@ -10335,7 +10345,7 @@ async function submitOrder() {
   if (!paymentPayload) return;
   const printReceipt = sessionStorage.getItem("pos_print_receipt") !== "0";
   if (existingOrder) {
-    existingOrder.customer = document.getElementById("customerName")?.value || existingOrder.customer || "Walk-in";
+    existingOrder.customer = customerDisplayName(document.getElementById("customerName")?.value);
     existingOrder.serviceInfo = document.getElementById("serviceInfo")?.value || existingOrder.serviceInfo || "-";
     existingOrder.note = document.getElementById("orderNote")?.value || existingOrder.note || "";
     existingOrder.paymentStatus = "Lunas";
@@ -10368,7 +10378,7 @@ async function submitOrder() {
     number: orderNumber(),
     source: "Kasir",
     type: orderType,
-    customer: document.getElementById("customerName")?.value || "Walk-in",
+    customer: customerDisplayName(document.getElementById("customerName")?.value),
     serviceInfo: document.getElementById("serviceInfo")?.value || "-",
     note: document.getElementById("orderNote")?.value || "",
     status: "Pesanan Baru",
@@ -10444,7 +10454,7 @@ async function saveOrderPayLater() {
     number: orderNumber(),
     source: "Kasir",
     type: orderType,
-    customer: document.getElementById("customerName")?.value || "Walk-in",
+    customer: customerDisplayName(document.getElementById("customerName")?.value),
     serviceInfo: document.getElementById("serviceInfo")?.value || "-",
     note: document.getElementById("orderNote")?.value || "",
     status: "Pesanan Baru",
@@ -10777,12 +10787,15 @@ function kitchenCard(order, sequenceNumber = 0) {
   normalizeOrderBatches(order);
   const next = nextKitchenAction(order.status);
   const canFinish = order.status !== "Sedang Disiapkan" || areAllKitchenItemsPrepared(order);
-  const customerName = order.customer || "Walk-in";
-  const orderTitle = `${displayOrderNumber(order.number)} - ${customerName}`;
+  const orderTitle = orderDisplayTitle(order);
   const groups = groupedOrderItems(order);
   const itemsReadyText = order.status === "Sedang Disiapkan"
     ? `${(order.items || []).filter((item, itemIndex) => isKitchenItemPrepared(order, item, itemIndex)).length}/${(order.items || []).length} item siap`
     : "";
+  const actionButtons = [
+    next ? `<button class="btn green" type="button" ${order.status === "Sedang Disiapkan" ? "data-kitchen-finish-button" : ""} onclick="event.preventDefault(); event.stopPropagation(); advanceOrder('${order.id}')" ${canFinish ? "" : "disabled"}>${next}</button>` : "",
+    canCancelOrder(order) ? `<button class="btn red" type="button" onclick="event.preventDefault(); event.stopPropagation(); openCancelOrderDialog('${order.id}')">Batalkan</button>` : ""
+  ].filter(Boolean).join("");
   return `
     <div class="card kitchen-order-card" data-kitchen-order-id="${escapeHtml(order.id || "")}">
       <div class="kitchen-order-head">
@@ -10833,19 +10846,9 @@ function kitchenCard(order, sequenceNumber = 0) {
         }).join("")}
       </div>
       ${itemsReadyText ? `<p class="kitchen-ready-progress" data-kitchen-ready-progress>${itemsReadyText}</p>` : ""}
-      <div class="toolbar kitchen-order-actions">
-        ${next ? `<button class="btn green" type="button" ${order.status === "Sedang Disiapkan" ? "data-kitchen-finish-button" : ""} onclick="event.preventDefault(); event.stopPropagation(); advanceOrder('${order.id}')" ${canFinish ? "" : "disabled"}>${next}</button>` : ""}
-        ${order.status === "Selesai" ? `<button class="btn" type="button" onclick="event.preventDefault(); event.stopPropagation(); printOrderLabel('${order.id}')">Print label</button>` : ""}
-        ${canCancelOrder(order) ? `<button class="btn red" type="button" onclick="event.preventDefault(); event.stopPropagation(); openCancelOrderDialog('${order.id}')">Batalkan</button>` : ""}
-      </div>
+      ${actionButtons ? `<div class="toolbar kitchen-order-actions">${actionButtons}</div>` : ""}
     </div>
   `;
-}
-
-function printOrderLabel(id) {
-  const order = state.orders.find(item => item.id === id);
-  if (!order) return;
-  toast(`Print label ${displayOrderNumber(order.number)} disiapkan.`);
 }
 
 function nextKitchenAction(status) {
@@ -11381,7 +11384,7 @@ function orderCenterCard(order, options = {}) {
           <b>${money(orderTotal(order))}</b>
         </div>
         <div class="unpaid-compact-meta">
-          <span>${escapeHtml(order.customer || "Walk-in")}</span>
+          <span>${escapeHtml(customerDisplayName(order.customer))}</span>
           <span>${escapeHtml(order.serviceInfo || "-")}</span>
           <span>${escapeHtml(order.type || "-")}</span>
         </div>
@@ -11429,7 +11432,7 @@ function orderCenterCard(order, options = {}) {
       <div class="orders-card-meta">
         <span>${escapeHtml(order.type || "-")}</span>
         <span>${escapeHtml(order.serviceInfo || "-")}</span>
-        <span>${escapeHtml(order.customer || "Walk-in")}</span>
+        <span>${escapeHtml(customerDisplayName(order.customer))}</span>
         <span>${escapeHtml(order.paymentStatus || "-")}</span>
       </div>
       ${transactionNote ? `
@@ -12696,7 +12699,7 @@ function orderReportRecord(order) {
     source: "Kasirin!",
     imported: false,
     type: order.type || "Dine In",
-    customer: order.customer || "Walk-in",
+    customer: customerDisplayName(order.customer),
     paymentMethod: order.paymentMethod || "Belum dipilih",
     paymentStatus: order.paymentStatus || "Belum lunas",
     status: order.status || "",
