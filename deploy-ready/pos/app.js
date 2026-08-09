@@ -5042,8 +5042,10 @@ async function loadSelfOrderTableOrdersFromSupabase(table, options = {}) {
     let orderQuery = supabaseClient
       .from("orders")
       .select("*")
+      .neq("payment_status", "Lunas")
+      .neq("status", "Dibatalkan")
       .order("updated_at", { ascending: false })
-      .limit(100);
+      .limit(20);
     if (tableValues.length) orderQuery = orderQuery.in("service_info", tableValues);
     const { data: orderRows, error: orderError } = await orderQuery;
     if (orderError) throw orderError;
@@ -5097,6 +5099,10 @@ async function loadSelfOrderTableOrdersFromSupabase(table, options = {}) {
       paymentsByOrderId.get(row.id)
     ));
     mergeSupabaseLiveOrders(serverOrders);
+    if (pruneSyncedSelfOrderTableOrders(table, serverOrders)) {
+      normalizeState();
+      saveState();
+    }
     return true;
   } catch (error) {
     console.warn("Self order table refresh failed", error);
@@ -5107,7 +5113,6 @@ async function loadSelfOrderTableOrdersFromSupabase(table, options = {}) {
 
 async function refreshSelfOrderTableOrders(table, options = {}) {
   if (!supabaseReadable() || !localDbReady) return false;
-  await loadRecentOrdersFromSupabase({ force: true, silent: true, reason: "selforder-table-check" });
   return loadSelfOrderTableOrdersFromSupabase(table, options);
 }
 
@@ -7833,6 +7838,24 @@ function selfOrderOpenTableOrder(table) {
     .filter(order => orderTableKey(order.serviceInfo) === normalizedTable)
     .filter(order => orderIsActiveTableOrder(order))
     .sort((a, b) => new Date(orderListActivityAt(b) || 0) - new Date(orderListActivityAt(a) || 0))[0] || null;
+}
+
+function pruneSyncedSelfOrderTableOrders(table, serverOrders = []) {
+  const normalizedTable = orderTableKey(table);
+  if (!normalizedTable) return false;
+  const serverIds = new Set((serverOrders || []).map(order => String(order.supabaseId || "").trim()).filter(Boolean));
+  const serverNumbers = new Set((serverOrders || []).map(order => String(order.number || "").trim()).filter(Boolean));
+  const before = state.orders.length;
+  state.orders = (state.orders || []).filter(order => {
+    if (orderTableKey(order.serviceInfo) !== normalizedTable) return true;
+    if (!orderIsActiveTableOrder(order)) return true;
+    const remoteId = String(order.supabaseId || "").trim();
+    const number = String(order.number || "").trim();
+    if (!remoteId && order.syncStatus !== "synced") return true;
+    if (remoteId) return serverIds.has(remoteId);
+    return !number || serverNumbers.has(number);
+  });
+  return state.orders.length !== before;
 }
 
 function selfOrderOpenTableChoiceKey(table, order) {
