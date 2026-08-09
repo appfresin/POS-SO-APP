@@ -14,6 +14,7 @@ const STAFF_SESSION_KEY = "omnipos_active_staff_session";
 const STAFF_SESSION_CONFIRMED_KEY = "omnipos_staff_session_confirmed";
 const STAFF_SESSION_LOGOUT_KEY = "omnipos_staff_logged_out";
 const SELF_ORDER_MENU_SCROLL_KEY = "self_order_menu_scroll_state";
+const SELF_ORDER_TABLE_CHOICE_KEY = "self_order_open_table_choice";
 const OPERATIONAL_CLEANUP_LAST_RUN_KEY = "kasirin_operational_cleanup_last_run";
 const OPERATIONAL_CLEANUP_RETENTION_DAYS = 31;
 const OPERATIONAL_CLEANUP_MIN_INTERVAL_HOURS = 20;
@@ -7834,6 +7835,78 @@ function selfOrderOpenTableOrder(table) {
     .sort((a, b) => new Date(orderListActivityAt(b) || 0) - new Date(orderListActivityAt(a) || 0))[0] || null;
 }
 
+function selfOrderOpenTableChoiceKey(table, order) {
+  const tableKey = orderTableKey(table);
+  const orderKey = String(order?.number || order?.id || "").trim();
+  return tableKey && orderKey ? `${tableKey}::${orderKey}` : "";
+}
+
+function selfOrderOpenTableChoice(table, order) {
+  const expectedKey = selfOrderOpenTableChoiceKey(table, order);
+  if (!expectedKey) return "";
+  try {
+    const choice = JSON.parse(sessionStorage.getItem(SELF_ORDER_TABLE_CHOICE_KEY) || "{}");
+    return choice.key === expectedKey && ["append", "new"].includes(choice.mode) ? choice.mode : "";
+  } catch {
+    return "";
+  }
+}
+
+function selfOrderChooseOpenTableOrder(mode) {
+  syncSelfOrderTableFromUrl();
+  const table = String(sessionStorage.getItem("self_order_table") || "A-1").trim();
+  const openOrder = selfOrderOpenTableOrder(table || "A-1");
+  const key = selfOrderOpenTableChoiceKey(table || "A-1", openOrder);
+  if (!key || !["append", "new"].includes(mode)) return;
+  sessionStorage.setItem(SELF_ORDER_TABLE_CHOICE_KEY, JSON.stringify({ key, mode }));
+  if (mode === "append" && openOrder?.customer) {
+    sessionStorage.setItem("self_order_customer", String(openOrder.customer || ""));
+  }
+  selfOrderSubmitError = "";
+  render();
+  toast(mode === "append" ? "Klik Selesaikan Pesanan di bawah." : "Isi nama, lalu klik Selesaikan Pesanan di bawah.");
+}
+
+function renderSelfOrderOpenTableHistory(order) {
+  const groups = groupedOrderItems(order);
+  if (!groups.length) return `<p class="self-order-open-table-empty">Belum ada item tercatat.</p>`;
+  return groups.map(group => `
+    <div class="self-order-open-table-group">
+      <span>${escapeHtml(group.label)}</span>
+      ${(group.items || []).map(item => `
+        <p>${escapeHtml(orderItemInlineLabel(item))}</p>
+      `).join("")}
+    </div>
+  `).join("");
+}
+
+function renderSelfOrderOpenTableDecision(order, table, choice) {
+  const customer = String(order?.customer || "").trim();
+  return `
+    <section class="self-order-open-table-card" aria-live="polite">
+      <div class="self-order-open-table-head">
+        <div>
+          <span>Meja ini masih punya pesanan aktif</span>
+        </div>
+        <em>${money(orderTotal(order))}</em>
+      </div>
+      <div class="self-order-open-table-meta">
+        <span>Meja: <b>${escapeHtml(table || "A-1")}</b></span>
+        <span>Nama: <b>${customer ? escapeHtml(customer) : "-"}</b></span>
+        <span>Status: <b>${escapeHtml(order?.paymentStatus || "Belum dibayar")}</b></span>
+      </div>
+      <div class="self-order-open-table-history">
+        ${renderSelfOrderOpenTableHistory(order)}
+      </div>
+      <p class="self-order-open-table-help">Ingin menambahkan pesanan ke transaksi yang sudah ada?</p>
+      <div class="self-order-open-table-actions">
+        <button class="${choice === "append" ? "active" : ""}" type="button" onclick="selfOrderChooseOpenTableOrder('append')">Ya, Tambahkan</button>
+        <button class="${choice === "new" ? "active" : ""}" type="button" onclick="selfOrderChooseOpenTableOrder('new')">Tidak, Buat baru</button>
+      </div>
+    </section>
+  `;
+}
+
 function tagOrderBatchItems(items, batch, batchNote = "", batchCreatedAt = "") {
   return (items || []).map(item => {
     const label = orderBatchLabel(batch);
@@ -8443,14 +8516,54 @@ function readSelfOrderVariantSelections(product) {
 }
 
 function readSelfOrderSelectedAddons(product) {
-  return Array.from(document.querySelectorAll("[data-self-addon]:checked")).map(input => {
+  return Array.from(document.querySelectorAll("[data-self-addon]")).map(input => {
     const addon = selfOrderAvailableAddons(product).find(item => item.id === input.value);
-    return addon ? { id: addon.id, name: addon.name, price: Number(addon.price || 0), cost: Number(addon.cost || 0), qty: 1 } : null;
+    if (!addon) return null;
+    const qtyInput = document.querySelector(`[data-self-addon-qty="${cssEscape(addon.id)}"]`);
+    const rawQty = Math.max(0, Number(qtyInput?.value || 0) || 0);
+    const qty = input.checked ? Math.max(1, rawQty || 1) : rawQty;
+    return qty > 0 ? { id: addon.id, name: addon.name, price: Number(addon.price || 0), cost: Number(addon.cost || 0), qty } : null;
   }).filter(Boolean);
 }
 
 function readSelfOrderItemNote() {
   return String(document.getElementById("selfOrderItemNote")?.value || sessionStorage.getItem("self_order_item_note") || "").trim();
+}
+
+function selfOrderAddonQty(product, addon) {
+  const id = String(addon?.id || "");
+  if (!id) return 0;
+  const inputQty = Math.max(0, Number(document.querySelector(`[data-self-addon-qty="${cssEscape(id)}"]`)?.value || 0) || 0);
+  if (inputQty) return inputQty;
+  const checked = document.querySelector(`[data-self-addon][value="${cssEscape(id)}"]`)?.checked;
+  if (checked) return 1;
+  const detailState = product ? selfOrderDetailCartState(product, { skipAddons: true }) : null;
+  const lineAddon = detailState?.line?.addons?.find(item => item.id === id);
+  return Math.max(0, Number(lineAddon?.qty || 0) || 0);
+}
+
+function selfOrderSyncAddonControl(productId, addonId, qty) {
+  qty = Math.max(0, Number(qty || 0) || 0);
+  const checkbox = document.querySelector(`[data-self-addon][value="${cssEscape(addonId)}"]`);
+  const input = document.querySelector(`[data-self-addon-qty="${cssEscape(addonId)}"]`);
+  const row = checkbox?.closest(".self-order-addon");
+  if (checkbox) checkbox.checked = qty > 0;
+  if (input) input.value = qty ? String(qty) : "";
+  row?.classList.toggle("active", qty > 0);
+  selfOrderUpdateDetailState(productId);
+}
+
+function selfOrderToggleAddon(productId, addonId) {
+  const checkbox = document.querySelector(`[data-self-addon][value="${cssEscape(addonId)}"]`);
+  const input = document.querySelector(`[data-self-addon-qty="${cssEscape(addonId)}"]`);
+  const currentQty = Math.max(0, Number(input?.value || 0) || 0);
+  selfOrderSyncAddonControl(productId, addonId, checkbox?.checked ? Math.max(1, currentQty || 1) : 0);
+}
+
+function selfOrderSetAddonQty(productId, addonId, delta) {
+  const input = document.querySelector(`[data-self-addon-qty="${cssEscape(addonId)}"]`);
+  const currentQty = Math.max(0, Number(input?.value || 0) || 0);
+  selfOrderSyncAddonControl(productId, addonId, currentQty + Number(delta || 0));
 }
 
 function selfOrderDetailVariantSignature(selections = []) {
@@ -8470,17 +8583,18 @@ function selfOrderDetailAddonSignature(addons = []) {
     .sort((a, b) => a.id.localeCompare(b.id)));
 }
 
-function selfOrderDetailCartLineMatches(item, product, selections, addons) {
+function selfOrderDetailCartLineMatches(item, product, selections, addons, note = "") {
   if (!item || item.productId !== product?.id) return false;
   return selfOrderDetailVariantSignature(item.variantSelections || []) === selfOrderDetailVariantSignature(selections)
-    && selfOrderDetailAddonSignature(item.addons || []) === selfOrderDetailAddonSignature(addons);
+    && selfOrderDetailAddonSignature(item.addons || []) === selfOrderDetailAddonSignature(addons)
+    && String(item.note || "").trim() === String(note || "").trim();
 }
 
-function selfOrderDetailCartState(product) {
+function selfOrderDetailCartState(product, options = {}) {
   const { selections, missingRequired } = readSelfOrderVariantSelections(product);
-  const addons = readSelfOrderSelectedAddons(product);
-  const line = missingRequired ? null : selfOrderCart.find(item => selfOrderDetailCartLineMatches(item, product, selections, addons));
   const note = readSelfOrderItemNote();
+  const addons = options.skipAddons ? [] : readSelfOrderSelectedAddons(product);
+  const line = missingRequired ? null : selfOrderCart.find(item => selfOrderDetailCartLineMatches(item, product, selections, addons, note));
   return { selections, missingRequired, addons, line, note };
 }
 
@@ -8580,8 +8694,9 @@ async function selfOrderSetDetailQty(productId, delta) {
 function selfOrderUpdateDetailState(productId) {
   const product = selfOrderProduct(productId);
   if (!product) return;
+  const currentQty = selfOrderDetailQty();
   const detailState = selfOrderDetailCartState(product);
-  const nextQty = detailState.line ? Math.max(0, Number(detailState.line.qty || 0) || 0) : 1;
+  const nextQty = detailState.line ? Math.max(0, Number(detailState.line.qty || 0) || 0) : Math.max(1, currentQty || 1);
   const noteInput = document.getElementById("selfOrderItemNote");
   if (noteInput && detailState.line) {
     noteInput.value = detailState.line.note || "";
@@ -8754,7 +8869,14 @@ async function selfOrderCreateOrder() {
   const checkoutTotal = subtotal;
   const tableRefreshed = await refreshSelfOrderTableOrders(table || "A-1", { force: true, silent: true });
   if (!tableRefreshed && supabaseReadable()) throw new Error("Gagal mengecek status meja");
-  const openOrder = selfOrderOpenTableOrder(table || "A-1");
+  const detectedOpenOrder = selfOrderOpenTableOrder(table || "A-1");
+  const openTableChoice = selfOrderOpenTableChoice(table || "A-1", detectedOpenOrder);
+  if (detectedOpenOrder && !openTableChoice) {
+    selfOrderSubmitError = "";
+    toast("Pilih dulu tambah pesanan atau pesanan baru.");
+    return;
+  }
+  const openOrder = openTableChoice === "append" ? detectedOpenOrder : null;
   const orderBatch = openOrder
     ? Math.max(1, ...((openOrder.items || []).map(orderItemBatch))) + 1
     : 1;
@@ -8826,6 +8948,7 @@ async function selfOrderCreateOrder() {
   saveSelfOrderCart();
   sessionStorage.removeItem("self_order_customer");
   sessionStorage.removeItem("self_order_checkout_note");
+  sessionStorage.removeItem(SELF_ORDER_TABLE_CHOICE_KEY);
   saveSelfOrderLastOrderSnapshot(order, checkoutTotal, {
     table: order.serviceInfo,
     customer: order.customer || customer || "",
@@ -9180,12 +9303,7 @@ function renderSelfOrderDetail() {
           ${addons.length ? `
             <div class="self-order-option-group">
               <h4>Tambahan</h4>
-              ${addons.map(addon => `
-                <label class="self-order-addon">
-                  <span><b>${escapeHtml(addon.name)}</b><small>+ ${money(addon.price)}</small></span>
-                  <input type="checkbox" value="${escapeHtml(addon.id)}" data-self-addon onchange="selfOrderUpdateDetailState('${escapeHtml(product.id)}')" />
-                </label>
-              `).join("")}
+              ${addons.map(addon => renderSelfOrderAddonControl(product, addon)).join("")}
             </div>
           ` : ""}
           <div class="self-order-option-group self-order-item-note-group">
@@ -9225,6 +9343,23 @@ function selfOrderDetailReadyToAdd(product) {
   const groups = selfOrderVariantGroups(product);
   if (!groups.length) return true;
   return groups.every(group => document.querySelector(`input[name="self_variant_${cssEscape(group.level)}"]:checked:not(:disabled)`));
+}
+
+function renderSelfOrderAddonControl(product, addon) {
+  const qty = selfOrderAddonQty(product, addon);
+  return `
+    <label class="self-order-addon ${qty > 0 ? "active" : ""}">
+      <span><b>${escapeHtml(addon.name)}</b><small>+ ${money(addon.price)}</small></span>
+      <div class="self-order-addon-control">
+        <input type="checkbox" value="${escapeHtml(addon.id)}" data-self-addon onchange="selfOrderToggleAddon('${escapeHtml(product.id)}', '${escapeHtml(addon.id)}')" ${qty > 0 ? "checked" : ""} />
+        <div class="self-order-addon-stepper" onclick="event.preventDefault(); event.stopPropagation()">
+          <button type="button" onclick="selfOrderSetAddonQty('${escapeHtml(product.id)}', '${escapeHtml(addon.id)}', -1)">-</button>
+          <input type="number" min="0" inputmode="numeric" value="${qty || ""}" placeholder="0" data-self-addon-qty="${escapeHtml(addon.id)}" onchange="selfOrderSyncAddonControl('${escapeHtml(product.id)}', '${escapeHtml(addon.id)}', this.value)" />
+          <button type="button" onclick="selfOrderSetAddonQty('${escapeHtml(product.id)}', '${escapeHtml(addon.id)}', 1)">+</button>
+        </div>
+      </div>
+    </label>
+  `;
 }
 
 function selfOrderUpdateAddButton(productId) {
@@ -9292,7 +9427,7 @@ function renderSelfOrderCart() {
           <article class="self-order-cart-item">
             <div>
               <strong>${escapeHtml(item.name)}</strong>
-              ${(item.addons || []).length ? `<small>${item.addons.map(addon => `+ ${escapeHtml(addon.name)}`).join(" ")}</small>` : ""}
+              ${(item.addons || []).length ? `<small>${item.addons.map(addon => `+ ${escapeHtml(addon.name)} ${Number(addon.qty || 0)}x`).join(" ")}</small>` : ""}
               ${orderItemNoteHtml(item, "self-order-cart-item-note")}
               <b>${money(cartItemTotal(item))}</b>
             </div>
@@ -9332,8 +9467,11 @@ function renderSelfOrderPayment() {
     `;
   }
   const openOrder = selfOrderOpenTableOrder(table || "A-1");
-  const lockedCustomer = openOrder ? String(openOrder.customer || "").trim() : "";
-  const isCustomerLocked = Boolean(openOrder && lockedCustomer);
+  const openTableChoice = selfOrderOpenTableChoice(table || "A-1", openOrder);
+  const needsOpenTableChoice = Boolean(openOrder && !openTableChoice);
+  const shouldAppendOpenOrder = openTableChoice === "append";
+  const lockedCustomer = shouldAppendOpenOrder ? String(openOrder?.customer || "").trim() : "";
+  const isCustomerLocked = Boolean(shouldAppendOpenOrder && lockedCustomer);
   const customer = isCustomerLocked ? lockedCustomer : (sessionStorage.getItem("self_order_customer") || "");
   const note = sessionStorage.getItem("self_order_checkout_note") || "";
   const customerInputAttrs = isCustomerLocked
@@ -9347,6 +9485,7 @@ function renderSelfOrderPayment() {
       <div class="self-order-section-head">
         <div><span>Pembayaran</span><h3>Total ${money(selfOrderSubtotal())}</h3></div>
       </div>
+      ${openOrder ? renderSelfOrderOpenTableDecision(openOrder, table || "A-1", openTableChoice) : ""}
       <section class="self-order-payment-shell">
         <div class="self-order-checkout">
           <label class="self-order-customer-field ${isCustomerLocked ? "self-order-customer-lock-field" : ""}"><span>Nama</span><input id="selfOrderCustomer" value="${escapeHtml(customer)}" placeholder="Wajib" required aria-required="true" aria-describedby="selfOrderCustomerError" ${customerInputAttrs} /><small id="selfOrderCustomerError" class="self-order-customer-error" role="alert" hidden>Nama wajib diisi.</small></label>
@@ -10836,6 +10975,9 @@ function kitchenCard(order, sequenceNumber = 0) {
   const next = nextKitchenAction(order.status);
   const canFinish = order.status !== "Sedang Disiapkan" || areAllKitchenItemsPrepared(order);
   const orderTitle = orderDisplayTitle(order);
+  const carryoverLabel = typeof kitchenOrderIsCarryover === "function" && kitchenOrderIsCarryover(order)
+    ? `<span class="kitchen-carryover-badge">Transaksi Kemarin</span>`
+    : "";
   const groups = groupedOrderItems(order);
   const itemsReadyText = order.status === "Sedang Disiapkan"
     ? `${(order.items || []).filter((item, itemIndex) => isKitchenItemPrepared(order, item, itemIndex)).length}/${(order.items || []).length} item siap`
@@ -10854,6 +10996,7 @@ function kitchenCard(order, sequenceNumber = 0) {
               <strong>${escapeHtml(orderTitle)}</strong>
             </div>
             <span>${dateTime(order.createdAt)}</span>
+            ${carryoverLabel}
           </div>
         </div>
         ${statusPill(order.status)}

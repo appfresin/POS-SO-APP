@@ -817,6 +817,11 @@
   background: #f8f9ff;
 }
 
+.self-order-addon.active {
+  border-color: rgba(67, 94, 145, .48);
+  background: #f4f7ff;
+}
+
 .self-order-addon span {
   min-width: 0;
   flex: 1;
@@ -842,10 +847,58 @@
   white-space: nowrap;
 }
 
-.self-order-addon input {
+.self-order-addon-control {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.self-order-addon input[type="checkbox"] {
   width: 18px;
   height: 18px;
   accent-color: #435e91;
+}
+
+.self-order-addon-stepper {
+  display: inline-grid;
+  grid-template-columns: 28px 36px 28px;
+  align-items: center;
+  min-height: 30px;
+  overflow: hidden;
+  border: 1px solid #d7dce7;
+  border-radius: 999px;
+  background: #fff;
+}
+
+.self-order-addon-stepper button {
+  width: 28px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: #eef3ff;
+  color: #435e91;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.self-order-addon-stepper input {
+  width: 36px;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  color: #101828;
+  font-size: 12px;
+  font-weight: 900;
+  text-align: center;
+  appearance: textfield;
+}
+
+.self-order-addon-stepper input::-webkit-outer-spin-button,
+.self-order-addon-stepper input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
 }
 
 .self-order-item-note {
@@ -1450,6 +1503,158 @@
   border-radius: 18px;
   background: white;
   box-shadow: 0 12px 30px rgba(30, 48, 67, .07);
+}
+
+.self-order-open-table-card {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid rgba(67, 94, 145, .22);
+  border-radius: 18px;
+  background: linear-gradient(135deg, #ffffff, #f4f8ff);
+  box-shadow: 0 12px 28px rgba(30, 48, 67, .08);
+}
+
+.self-order-open-table-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.self-order-open-table-head div {
+  display: grid;
+  gap: 3px;
+}
+
+.self-order-open-table-head span {
+  color: #1e3043;
+  font-size: 16px;
+  font-weight: 900;
+  line-height: 1.25;
+  text-transform: none;
+}
+
+.self-order-open-table-head strong {
+  color: #1e3043;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.self-order-open-table-head em {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #eaf7f2;
+  color: #087455;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.self-order-open-table-help {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.self-order-open-table-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.self-order-open-table-meta span {
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(234, 247, 242, .8);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.self-order-open-table-meta b {
+  color: #1e3043;
+}
+
+.self-order-open-table-history {
+  display: grid;
+  gap: 8px;
+  max-height: 190px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid rgba(196, 198, 207, .65);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .78);
+}
+
+.self-order-open-table-group {
+  display: grid;
+  gap: 5px;
+}
+
+.self-order-open-table-group + .self-order-open-table-group {
+  padding-top: 8px;
+  border-top: 1px solid #e5e9f0;
+}
+
+.self-order-open-table-group span {
+  color: #435e91;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.self-order-open-table-group p,
+.self-order-open-table-empty {
+  margin: 0;
+  color: #1e3043;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.self-order-open-table-group b {
+  color: #087455;
+}
+
+.self-order-open-table-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.self-order-open-table-actions button {
+  min-height: 40px;
+  border: 1px solid #d7deeb;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #435e91;
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: none;
+}
+
+.self-order-open-table-actions button:first-child {
+  border-color: rgba(8, 116, 85, .24);
+  color: #087455;
+}
+
+.self-order-open-table-actions button.active {
+  border-color: #435e91;
+  background: #eef3ff;
+  color: #274779;
+  box-shadow: inset 0 0 0 1px rgba(67, 94, 145, .18);
+}
+
+.self-order-open-table-actions button:first-child.active {
+  border-color: #087455;
+  background: #eaf7f2;
+  color: #087455;
+  box-shadow: inset 0 0 0 1px rgba(8, 116, 85, .18);
 }
 
 .self-order-payment-total {
