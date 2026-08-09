@@ -7863,6 +7863,7 @@ function selfOrderChooseOpenTableOrder(mode) {
     sessionStorage.setItem("self_order_customer", String(openOrder.customer || ""));
   }
   selfOrderSubmitError = "";
+  sessionStorage.setItem("self_order_step", "payment");
   render();
   toast(mode === "append" ? "Klik Selesaikan Pesanan di bawah." : "Isi nama, lalu klik Selesaikan Pesanan di bawah.");
 }
@@ -8114,6 +8115,10 @@ function selfOrderActiveCategory() {
 
 function selfOrderStep() {
   return sessionStorage.getItem("self_order_step") || "menu";
+}
+
+function selfOrderNavStep(step = selfOrderStep()) {
+  return ["table-check", "table-decision"].includes(step) ? "payment" : step;
 }
 
 function pushSelfOrderHistory(step) {
@@ -8475,13 +8480,17 @@ async function selfOrderShowPayment() {
   }
   syncSelfOrderTableFromUrl();
   const table = String(sessionStorage.getItem("self_order_table") || "A-1").trim();
-  sessionStorage.setItem("self_order_step", "payment");
-  pushSelfOrderHistory("payment");
+  sessionStorage.setItem("self_order_step", "table-check");
+  pushSelfOrderHistory("table-check");
   selfOrderTableChecking = true;
   render();
   await refreshSelfOrderTableOrders(table || "A-1", { force: true, silent: true });
   selfOrderTableChecking = false;
-  if (selfOrderStep() === "payment") render();
+  if (selfOrderStep() !== "table-check") return;
+  const openOrder = selfOrderOpenTableOrder(table || "A-1");
+  const choice = selfOrderOpenTableChoice(table || "A-1", openOrder);
+  sessionStorage.setItem("self_order_step", openOrder && !choice ? "table-decision" : "payment");
+  render();
 }
 
 function selfOrderAvailableAddons(product) {
@@ -8978,15 +8987,18 @@ function renderSelfOrder() {
   const step = selfOrderStep();
   const content = step === "detail" ? renderSelfOrderDetail()
     : step === "cart" ? renderSelfOrderCart()
+    : step === "table-check" ? renderSelfOrderTableCheck()
+    : step === "table-decision" ? renderSelfOrderTableDecision()
     : step === "payment" ? renderSelfOrderPayment()
     : step === "success" ? renderSelfOrderSuccess()
     : renderSelfOrderMenu();
+  const navStep = selfOrderNavStep(step);
   return `
     <section class="self-order-app">
       ${renderSelfOrderTopbar()}
       ${content}
       ${step === "menu" ? renderSelfOrderFloatingCart() : ""}
-      ${renderSelfOrderBottomNav(step)}
+      ${renderSelfOrderBottomNav(navStep)}
     </section>
   `;
 }
@@ -9451,24 +9463,39 @@ function renderSelfOrderCart() {
   `;
 }
 
+function renderSelfOrderTableCheck() {
+  return `
+    <main class="self-order-main payment">
+      <section class="self-order-loading-card" aria-live="polite" aria-busy="true">
+        <span class="self-order-loading-spinner" aria-hidden="true"></span>
+        <strong>Mengecek status meja</strong>
+        <p>Mohon tunggu sebentar.</p>
+      </section>
+    </main>
+  `;
+}
+
+function renderSelfOrderTableDecision() {
+  syncSelfOrderTableFromUrl();
+  const table = String(sessionStorage.getItem("self_order_table") || "A-1").trim();
+  const openOrder = selfOrderOpenTableOrder(table || "A-1");
+  if (!openOrder) return renderSelfOrderPayment();
+  return `
+    <main class="self-order-main payment">
+      <div class="self-order-section-head">
+        <div><span>Pembayaran</span><h3>Total ${money(selfOrderSubtotal())}</h3></div>
+      </div>
+      ${renderSelfOrderOpenTableDecision(openOrder, table || "A-1", selfOrderOpenTableChoice(table || "A-1", openOrder))}
+    </main>
+  `;
+}
+
 function renderSelfOrderPayment() {
   sessionStorage.setItem("self_order_payment", "cash");
   syncSelfOrderTableFromUrl();
   const table = String(sessionStorage.getItem("self_order_table") || "A-1").trim();
-  if (selfOrderTableChecking) {
-    return `
-      <main class="self-order-main payment">
-        <section class="self-order-loading-card" aria-live="polite" aria-busy="true">
-          <span class="self-order-loading-spinner" aria-hidden="true"></span>
-          <strong>Mengecek status meja</strong>
-          <p>Mohon tunggu sebentar.</p>
-        </section>
-      </main>
-    `;
-  }
   const openOrder = selfOrderOpenTableOrder(table || "A-1");
   const openTableChoice = selfOrderOpenTableChoice(table || "A-1", openOrder);
-  const needsOpenTableChoice = Boolean(openOrder && !openTableChoice);
   const shouldAppendOpenOrder = openTableChoice === "append";
   const lockedCustomer = shouldAppendOpenOrder ? String(openOrder?.customer || "").trim() : "";
   const isCustomerLocked = Boolean(shouldAppendOpenOrder && lockedCustomer);
@@ -9485,7 +9512,6 @@ function renderSelfOrderPayment() {
       <div class="self-order-section-head">
         <div><span>Pembayaran</span><h3>Total ${money(selfOrderSubtotal())}</h3></div>
       </div>
-      ${openOrder ? renderSelfOrderOpenTableDecision(openOrder, table || "A-1", openTableChoice) : ""}
       <section class="self-order-payment-shell">
         <div class="self-order-checkout">
           <label class="self-order-customer-field ${isCustomerLocked ? "self-order-customer-lock-field" : ""}"><span>Nama</span><input id="selfOrderCustomer" value="${escapeHtml(customer)}" placeholder="Wajib" required aria-required="true" aria-describedby="selfOrderCustomerError" ${customerInputAttrs} /><small id="selfOrderCustomerError" class="self-order-customer-error" role="alert" hidden>Nama wajib diisi.</small></label>
