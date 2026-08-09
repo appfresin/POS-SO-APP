@@ -5023,6 +5023,18 @@
   line-height: 1.15;
 }
 
+.view-kitchen .kitchen-carryover-badge {
+  width: fit-content;
+  margin-top: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(255, 244, 214, .92);
+  color: #9a5b00;
+  font-size: 10.5px;
+  font-weight: 850;
+  line-height: 1.1;
+}
+
 .order-title-row {
   min-width: 0;
   display: flex;

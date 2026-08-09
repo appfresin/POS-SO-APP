@@ -19,6 +19,11 @@ function kitchenOrderHasSequence(order) {
   return ["Pesanan Baru", "Sedang Disiapkan"].includes(order?.status);
 }
 
+function kitchenOrderIsCarryover(order, currentDateKey = todayKey()) {
+  const orderDateKey = todayKey(new Date(order?.createdAt || Date.now()));
+  return orderDateKey !== currentDateKey && kitchenOrderHasSequence(order);
+}
+
 function kitchenOrderIsVisible(order, filter, visibleStatuses) {
   const cancelled = typeof orderIsCancelled === "function"
     ? orderIsCancelled(order)
@@ -44,7 +49,7 @@ function renderKitchen() {
   const orders = state.orders
     .filter(order => {
       const isToday = todayKey(new Date(order.createdAt || Date.now())) === today;
-      if (!isToday) return false;
+      if (!isToday && !kitchenOrderIsCarryover(order, today)) return false;
       return kitchenOrderIsVisible(order, kitchenFilter, kitchenStatuses);
     })
     .sort(kitchenOrderStableSort);

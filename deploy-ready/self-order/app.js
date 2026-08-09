@@ -2415,7 +2415,9 @@ function supabaseWritable() {
 }
 
 function customerDisplayName(customer) {
-  return String(customer || "").trim();
+  const value = String(customer || "").trim();
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return normalized === "walkin" ? "" : value;
 }
 
 function orderDisplayTitle(order) {
@@ -4763,16 +4765,44 @@ function applyPendingKitchenOrderMutation(remoteOrder, existingOrder = null) {
   };
 }
 
+function supabaseOrderItemDedupeKey(item = {}) {
+  const variantData = item.variant_data || {};
+  const lineId = String(variantData.clientLineId || "").trim();
+  if (lineId) return `line:${lineId}`;
+  const orderIndex = Number(variantData.clientOrderIndex);
+  return Number.isFinite(orderIndex) ? `order-index:${orderIndex}` : "";
+}
+
+function dedupeSupabaseOrderItemRows(itemRows = []) {
+  const rows = [];
+  const indexes = new Map();
+  itemRows.forEach(item => {
+    const key = supabaseOrderItemDedupeKey(item);
+    if (!key) {
+      rows.push(item);
+      return;
+    }
+    const existingIndex = indexes.get(key);
+    if (existingIndex === undefined) {
+      indexes.set(key, rows.length);
+      rows.push(item);
+      return;
+    }
+    rows[existingIndex] = item;
+  });
+  return rows;
+}
+
 function normalizeSupabaseLiveOrder(orderRow, itemRows = [], addonsByItemId = new Map(), payment = null) {
   const existing = state.orders.find(order => order.number === orderRow.order_number);
-  const sortedItemRows = [...itemRows].sort((a, b) => {
+  const sortedItemRows = dedupeSupabaseOrderItemRows([...itemRows].sort((a, b) => {
     const dataA = a.variant_data || {};
     const dataB = b.variant_data || {};
     const indexA = Number.isFinite(Number(dataA.clientOrderIndex)) ? Number(dataA.clientOrderIndex) : Number.MAX_SAFE_INTEGER;
     const indexB = Number.isFinite(Number(dataB.clientOrderIndex)) ? Number(dataB.clientOrderIndex) : Number.MAX_SAFE_INTEGER;
     if (indexA !== indexB) return indexA - indexB;
     return String(a.id || "").localeCompare(String(b.id || ""));
-  });
+  }));
   const items = sortedItemRows.map((item, index) => {
     const variantData = item.variant_data || {};
     const matchedProduct = state.products.find(product => {
@@ -7726,9 +7756,27 @@ function orderItemBatchCreatedAt(item) {
   return String(item?.orderBatchCreatedAt || item?.variantData?.orderBatchCreatedAt || "").trim();
 }
 
+function orderItemDedupeKey(item = {}) {
+  const lineId = String(item.lineId || item.variantData?.clientLineId || "").trim();
+  if (lineId) return `line:${lineId}`;
+  const orderIndex = Number(item.variantData?.clientOrderIndex);
+  return Number.isFinite(orderIndex) ? `order-index:${orderIndex}` : "";
+}
+
+function dedupeOrderItems(items = []) {
+  const seen = new Set();
+  return items.filter(item => {
+    const key = orderItemDedupeKey(item);
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function normalizeOrderBatches(order) {
   if (!order?.items?.length) return order;
-  order.items = order.items.map(item => {
+  order.items = dedupeOrderItems(order.items).map(item => {
     const batch = orderItemBatch(item);
     const batchCreatedAt = orderItemBatchCreatedAt(item) || (batch === 1 ? String(order?.createdAt || "") : "");
     return {
