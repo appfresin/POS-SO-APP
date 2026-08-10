@@ -9868,7 +9868,7 @@ function renderPosCartPanel() {
           </div>
           <div class="final-action-grid">
             <button class="btn pos-pay-button" onclick="submitOrder()" ${cart.length ? "" : "disabled"}>Bayar</button>
-            <button class="btn pay-later-button" onclick="saveOrderPayLater()" ${cart.length && !payingUnpaidId ? "" : "disabled"}>BAYAR NANTI</button>
+            <button class="btn pay-later-button" onclick="saveOrderPayLater()" ${cart.length ? "" : "disabled"}>BAYAR NANTI</button>
           </div>
         </div>
       ` : `
@@ -10452,6 +10452,38 @@ function unpaidOrders() {
   return state.orders.filter(order => order.paymentStatus === "Belum dibayar" && !orderIsCancelled(order));
 }
 
+function orderAdditionalItems(existingItems = [], nextItems = []) {
+  const previousByKey = (existingItems || []).reduce((map, item) => {
+    map.set(cartItemKey(item), Number(item.qty || 0));
+    return map;
+  }, new Map());
+  return (nextItems || [])
+    .map(item => {
+      const previousQty = previousByKey.get(cartItemKey(item)) || 0;
+      const qty = Number(item.qty || 0) - previousQty;
+      return qty > 0 ? { ...item, qty } : null;
+    })
+    .filter(Boolean);
+}
+
+function prepareAdditionalOrderItems(existingItems = [], nextItems = [], batch = 1, batchNote = "", batchCreatedAt = "") {
+  const existingKeys = new Set((existingItems || []).map(item => cartItemKey(item)));
+  const additionalItems = orderAdditionalItems(existingItems, nextItems).map(item => {
+    const existedBefore = existingKeys.has(cartItemKey(item));
+    if (!existedBefore) return { ...item };
+    const lineId = uid();
+    return {
+      ...item,
+      lineId,
+      variantData: {
+        ...(item.variantData || {}),
+        clientLineId: lineId
+      }
+    };
+  });
+  return tagOrderBatchItems(additionalItems, batch, batchNote, batchCreatedAt);
+}
+
 function selectedUnpaidFilter() {
   return sessionStorage.getItem("pos_unpaid_filter") || "Semua";
 }
@@ -10679,12 +10711,76 @@ async function submitOrder() {
 async function saveOrderPayLater() {
   if (!state.cashSession.open) return toast("Buka kas terlebih dahulu.");
   if (!cart.length) return toast("Keranjang masih kosong.");
-  const orderType = requirePosOrderTypeBeforePayment();
+  const payingUnpaidId = sessionStorage.getItem("pos_pay_unpaid_id");
+  const existingOrder = payingUnpaidId ? state.orders.find(item => item.id === payingUnpaidId) : null;
+  const orderType = existingOrder?.type || requirePosOrderTypeBeforePayment();
   if (!orderType) return;
   const subtotal = cartSubtotal();
   const discount = orderDiscountAmount(subtotal);
   const tax = 0;
   const grandTotal = Math.max(0, subtotal - discount);
+  if (existingOrder) {
+    const nextItems = cart.map(item => ({ ...item }));
+    const orderBatch = Math.max(1, ...((existingOrder.items || []).map(orderItemBatch))) + 1;
+    const updateCreatedAt = new Date().toISOString();
+    const additionalItems = prepareAdditionalOrderItems(existingOrder.items || [], nextItems, orderBatch, document.getElementById("orderNote")?.value || existingOrder.note || "", updateCreatedAt);
+    if (!additionalItems.length && subtotal === Number(existingOrder.subtotal || 0) && discount === Number(existingOrder.discount || 0)) {
+      return toast("Belum ada tambahan pesanan.");
+    }
+    const stockValidation = validateLimitedStockItems(additionalItems);
+    if (!stockValidation.ok) return toast(limitedStockMessage(stockValidation.product, stockValidation.variantKey, stockValidation.available));
+    const stockCommit = await commitLimitedStockReservations(additionalItems, existingOrder.number, "POS");
+    if (!stockCommit.accepted) {
+      return toast(limitedStockFailureMessage(stockCommit.product || stockValidation.product, stockCommit.variantKey || "", stockCommit));
+    }
+    existingOrder.customer = customerDisplayName(document.getElementById("customerName")?.value);
+    existingOrder.serviceInfo = document.getElementById("serviceInfo")?.value || existingOrder.serviceInfo || "-";
+    existingOrder.note = document.getElementById("orderNote")?.value || existingOrder.note || "";
+    existingOrder.items = additionalItems.length ? [...(existingOrder.items || []), ...additionalItems] : nextItems;
+    existingOrder.subtotal = subtotal;
+    existingOrder.discount = discount;
+    existingOrder.tax = tax;
+    existingOrder.grandTotal = grandTotal;
+    existingOrder.paymentStatus = "Belum dibayar";
+    existingOrder.paymentMethod = "Bayar nanti";
+    existingOrder.updatedAt = updateCreatedAt;
+    if (additionalItems.length) {
+      existingOrder.status = "Pesanan Baru";
+      existingOrder.confirmedAt = null;
+      existingOrder.preparedAt = null;
+      existingOrder.readyAt = null;
+      existingOrder.completedAt = null;
+      existingOrder.pendingPushEventType = "additional_order";
+    } else {
+      existingOrder.pendingPushEventType = existingOrder.pendingPushEventType || "new_order";
+    }
+    if (stockCommit.token) existingOrder.limitedStockCommitToken = stockCommit.token;
+    const touchedProductIds = applyLimitedStockItems(additionalItems, -1, `Tambahan bayar nanti ${existingOrder.number}`);
+    for (const item of additionalItems) {
+      for (const addon of item.addons || []) {
+        const addonProduct = state.products.find(product => product.id === addon.id);
+        if (addonProduct?.trackStock) {
+          addonProduct.stock = Math.max(0, addonProduct.stock - addon.qty);
+          touchedProductIds.push(addonProduct.id);
+          state.stockMovements.unshift({ id: uid(), at: new Date().toISOString(), productId: addonProduct.id, productName: addonProduct.name, qty: -addon.qty, reason: `Add-on tambahan bayar nanti ${existingOrder.number}` });
+        }
+      }
+    }
+    cart = [];
+    clearPosDraft();
+    sessionStorage.setItem("pos_mobile_view", "items");
+    setLastResult("Pesanan tambahan disimpan", "Pesanan tambahan masuk dapur dan pembayaran tetap dicatat untuk nanti.", existingOrder);
+    audit("Pesanan bayar nanti diperbarui", `${existingOrder.number} ${existingOrder.type} ${money(orderTotal(existingOrder))}`);
+    saveState();
+    const committedProductIds = new Set([...limitedStockItemTotals(additionalItems).values()].map(entry => entry.product.id));
+    syncProductsByIds(touchedProductIds.filter(productId => !committedProductIds.has(productId)));
+    rotateLimitedStockReservationToken("POS");
+    toastOrderSyncOutcome(existingOrder, "Pesanan tambahan disimpan dan dikirim ke dapur.");
+    broadcastRealtimeEvent("products");
+    broadcastRealtimeEvent("orders");
+    render();
+    return;
+  }
   const order = {
     id: uid(),
     number: orderNumber(),
