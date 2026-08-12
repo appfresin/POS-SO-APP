@@ -404,6 +404,7 @@ window.addEventListener("popstate", event => {
     selfOrderHistoryNavigating = false;
     return;
   }
+  if (handlePosMobileBackNavigation()) return;
   if (handleMainBackNavigation()) return;
 });
 
@@ -1184,6 +1185,37 @@ function handleMainBackNavigation() {
   setAppHash(homeView, { replace: true });
   render();
   return true;
+}
+
+function handlePosMobileBackNavigation() {
+  if (IS_SELF_ORDER_APP || view !== "pos") return false;
+  if (!isPosMobileLayout()) return false;
+  const mobileView = sessionStorage.getItem("pos_mobile_view") || "items";
+  const cartStep = sessionStorage.getItem("pos_cart_step") || "items";
+  if (mobileView !== "cart" && cartStep !== "payment") return false;
+  sessionStorage.setItem("pos_mobile_view", "items");
+  sessionStorage.setItem("pos_cart_step", "items");
+  setAppHash("pos", { replace: true });
+  render();
+  return true;
+}
+
+function pushPosMobileCartHistoryState() {
+  if (IS_SELF_ORDER_APP || view !== "pos") return;
+  if (!isPosMobileLayout()) return;
+  try {
+    const currentState = history.state || {};
+    if (currentState.posMobileView === "cart") return;
+    history.pushState(historyStateForView("pos", { posMobileView: "cart" }), "", "#pos");
+  } catch (error) {
+    console.warn("POS mobile history state skipped", error);
+  }
+}
+
+function isPosMobileLayout() {
+  return typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(max-width: 760px)").matches;
 }
 
 function syncSelfOrderTableFromUrl() {
@@ -8094,9 +8126,11 @@ function setCartStep(step) {
 }
 
 function setPosMobileView(mode) {
+  const previousMode = sessionStorage.getItem("pos_mobile_view") || "items";
   sessionStorage.setItem("pos_mobile_view", mode);
   if (mode === "cart") {
     sessionStorage.setItem("pos_cart_step", "items");
+    if (previousMode !== "cart") pushPosMobileCartHistoryState();
   }
   refreshPosFast({ layout: true, cart: true, mobileBar: true, preserveScroll: true });
 }
@@ -10223,13 +10257,13 @@ function openVariantPicker(id) {
   openModal(`
     <div class="section-title variant-picker-title">
       <div><h3>${escapeHtml(product.name)}</h3><p>Pilih varian terlebih dahulu sebelum item masuk ke keranjang.</p></div>
-      <div class="toolbar"><button class="btn" onclick="closeModal()">Tutup</button></div>
+      <div class="toolbar"><button class="btn" onclick="closeModal({ skipHistory: true })">Tutup</button></div>
     </div>
     <form class="variant-picker-form" onsubmit="return addVariantToCart(event, '${product.id}')" novalidate>
       ${pickerBody}
       <button class="btn accent variant-picker-submit" type="submit">Masukkan ke Keranjang</button>
     </form>
-  `);
+  `, { skipHistory: true });
 }
 
 function renderSingleLevelVariantPicker(product, groups) {
