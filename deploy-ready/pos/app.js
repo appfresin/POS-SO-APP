@@ -244,6 +244,7 @@ let storeSettingsLoading = false;
 let storeSettingsLoadedAt = 0;
 let storeSettingsJsonUnavailable = false;
 let supabaseSupportsPreparedItems = true;
+let supabaseSupportsOrderNotificationCategories = true;
 let supabaseStockOpnameColumnsReady = false;
 let supabaseStockMovementExtraColumnsReady = true;
 let supabaseAddonSoldOutColumnReady = true;
@@ -1997,6 +1998,18 @@ function orderKitchenNotificationCategories(order = {}) {
   return normalizeKitchenNotificationCategories((order.items || order.cart || []).map(orderItemKitchenNotificationCategory));
 }
 
+function orderPushNotificationCategories(order = {}) {
+  const items = Array.isArray(order?.items) ? order.items : [];
+  if (order?.pendingPushEventType !== "additional_order" || !items.length) {
+    return orderKitchenNotificationCategories(order);
+  }
+  const newestBatch = Math.max(1, ...items.map(orderItemBatch));
+  const newestCategories = normalizeKitchenNotificationCategories(
+    items.filter(item => orderItemBatch(item) === newestBatch).map(orderItemKitchenNotificationCategory)
+  );
+  return newestCategories.length ? newestCategories : orderKitchenNotificationCategories(order);
+}
+
 function orderMatchesKitchenNotificationCategories(order = {}) {
   const selected = deviceKitchenNotificationCategories();
   if (!selected.length) return true;
@@ -2242,7 +2255,7 @@ async function notifyNativePushForOrder(order, options = {}) {
         scopeKey: nativePushScopeKey(),
         target: "all",
         tone: state.settings?.orderNotificationTone || "bell",
-        orderCategories: orderKitchenNotificationCategories(order),
+        orderCategories: orderPushNotificationCategories(order),
         reminderIntervalSeconds: Math.max(10, Math.min(3600, Number(state.settings?.orderNotificationReminderSeconds || 180)))
       }
     });
@@ -3985,6 +3998,7 @@ async function syncOrderToSupabase(order, options = {}) {
       completed_at: order.completedAt,
       cancelled_at: order.cancelledAt,
       cancel_reason: order.cancelReason || "",
+      notification_categories: orderPushNotificationCategories(order),
       prepared_items: order.preparedItems || {}
     };
     const { data: orderRows, error: orderError } = await upsertSupabaseOrderPayload(orderPayload);
@@ -4105,9 +4119,9 @@ async function syncOrderToSupabase(order, options = {}) {
 }
 
 async function upsertSupabaseOrderPayload(orderPayload) {
-  let writePayload = supabaseSupportsPreparedItems
-    ? orderPayload
-    : (({ prepared_items, ...payload }) => payload)(orderPayload);
+  let writePayload = { ...orderPayload };
+  if (!supabaseSupportsPreparedItems) delete writePayload.prepared_items;
+  if (!supabaseSupportsOrderNotificationCategories) delete writePayload.notification_categories;
   let result = await supabaseClient
     .from("orders")
     .upsert(writePayload, { onConflict: "order_number" })
@@ -4124,11 +4138,22 @@ async function upsertSupabaseOrderPayload(orderPayload) {
       .select("id")
       .single();
   }
+  const missingNotificationCategories = result.error
+    && (result.error.code === "42703" || String(result.error.message || "").toLowerCase().includes("notification_categories"));
+  if (missingNotificationCategories && supabaseSupportsOrderNotificationCategories) {
+    supabaseSupportsOrderNotificationCategories = false;
+    delete writePayload.notification_categories;
+    result = await supabaseClient
+      .from("orders")
+      .upsert(writePayload, { onConflict: "order_number" })
+      .select("id")
+      .single();
+  }
   const missingPreparedItems = result.error
     && (result.error.code === "42703" || String(result.error.message || "").toLowerCase().includes("prepared_items"));
   if (!missingPreparedItems || !supabaseSupportsPreparedItems) return result;
   supabaseSupportsPreparedItems = false;
-  const { prepared_items, cancel_reason, ...compatiblePayload } = orderPayload;
+  const { prepared_items, cancel_reason, notification_categories, ...compatiblePayload } = orderPayload;
   return supabaseClient
     .from("orders")
     .upsert(compatiblePayload, { onConflict: "order_number" })
