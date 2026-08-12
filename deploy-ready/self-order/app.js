@@ -272,6 +272,9 @@ let nativePushTokenRegistering = false;
 let nativePushTokenRegisterRetryTimer = null;
 let nativePushTokenLastAttemptAt = 0;
 let nativePushTokenRetryCount = 0;
+let nativePushNavigationSessionId = 0;
+let activeNativePushNavigationSessionId = 0;
+const cancelledNativePushNavigationSessions = new Set();
 let appConfirmHandlers = { confirm: null, cancel: null };
 let appCancelContext = { orderId: null, returnToUnpaid: false };
 let activeModalState = null;
@@ -2244,10 +2247,30 @@ function normalizeNativePushOrderTarget(target = {}) {
     return {
       orderId: String(target.orderId || target.order_id || "").trim(),
       orderNumber: String(target.orderNumber || target.order_number || "").trim(),
-      navigate: target.navigate === true
+      navigate: target.navigate === true,
+      navigationSessionId: Number(target.navigationSessionId || target.navigation_session_id || 0) || 0
     };
   }
-  return { orderId: "", orderNumber: "", navigate: false };
+  return { orderId: "", orderNumber: "", navigate: false, navigationSessionId: 0 };
+}
+
+function assignNativePushNavigationSession(target) {
+  if (!target?.navigate) return target;
+  if (!target.navigationSessionId) {
+    nativePushNavigationSessionId += 1;
+    target.navigationSessionId = nativePushNavigationSessionId;
+  }
+  activeNativePushNavigationSessionId = target.navigationSessionId;
+  return target;
+}
+
+function cancelNativePushAutoNavigation() {
+  if (!activeNativePushNavigationSessionId) return;
+  cancelledNativePushNavigationSessions.add(activeNativePushNavigationSessionId);
+  if (cancelledNativePushNavigationSessions.size > 16) {
+    const [oldest] = cancelledNativePushNavigationSessions;
+    cancelledNativePushNavigationSessions.delete(oldest);
+  }
 }
 
 function nativePushOrderTargetMatched(target = {}) {
@@ -2283,10 +2306,13 @@ function flushPendingNativePushOrderRefresh() {
 function scheduleNativePushOrderRefresh(route = "orders", attempt = 0, target = {}) {
   const normalizedRoute = ["kitchen", "orders"].includes(route) ? route : "orders";
   const nextAttempt = Number(attempt || 0);
-  const normalizedTarget = normalizeNativePushOrderTarget(target);
+  const normalizedTarget = assignNativePushNavigationSession(normalizeNativePushOrderTarget(target));
   try {
-    const shouldNavigate = normalizedTarget.navigate === true;
-    if (typeof go === "function" && view !== normalizedRoute && !isBlockingInteractionActive() && shouldNavigate) go(normalizedRoute);
+    const shouldNavigate = normalizedTarget.navigate === true
+      && !cancelledNativePushNavigationSessions.has(normalizedTarget.navigationSessionId);
+    if (typeof go === "function" && view !== normalizedRoute && !isBlockingInteractionActive() && shouldNavigate) {
+      go(normalizedRoute, { source: "native-push" });
+    }
     if (realtimeOrdersLoading) {
       queueNativePushOrderRefresh(normalizedRoute, Math.min(nextAttempt + 1, 12), normalizedTarget);
       return;
@@ -6318,7 +6344,8 @@ function renderSelfOrderStandalone() {
   restoreSelfOrderMenuScroll();
 }
 
-function go(id) {
+function go(id, options = {}) {
+  if (options.source !== "native-push") cancelNativePushAutoNavigation();
   const requested = id;
   id = normalizeView(id);
   if (requested !== id && navItems.some(([navId]) => navId === requested)) {
@@ -7922,10 +7949,10 @@ function renderSelfOrderOpenTableDecision(order, table, choice) {
       <div class="self-order-open-table-history">
         ${renderSelfOrderOpenTableHistory(order)}
       </div>
-      <p class="self-order-open-table-help">Ingin menambahkan pesanan ke transaksi yang sudah ada?</p>
+      <p class="self-order-open-table-help">Apakah itu pesanan anda sebelumnya?</p>
       <div class="self-order-open-table-actions">
-        <button class="${choice === "append" ? "active" : ""}" type="button" onclick="selfOrderChooseOpenTableOrder('append')">Ya, Tambahkan</button>
-        <button class="${choice === "new" ? "active" : ""}" type="button" onclick="selfOrderChooseOpenTableOrder('new')">Tidak, Buat baru</button>
+        <button class="${choice === "append" ? "active" : ""}" type="button" onclick="selfOrderChooseOpenTableOrder('append')">Ya</button>
+        <button class="${choice === "new" ? "active" : ""}" type="button" onclick="selfOrderChooseOpenTableOrder('new')">Tidak</button>
       </div>
     </section>
   `;
@@ -8128,6 +8155,113 @@ function selfOrderLastOrderSnapshot() {
   } catch {
     return null;
   }
+}
+
+function canMoveOrderTable(order) {
+  return Boolean(order)
+    && order.type === "Dine In"
+    && order.status !== "Dibatalkan"
+    && order.paymentStatus !== "Lunas";
+}
+
+function orderById(id) {
+  return state.orders.find(order => order.id === id) || null;
+}
+
+function activeOrderAtTable(table, exceptOrderId = "") {
+  const normalized = orderTableKey(table);
+  if (!normalized) return null;
+  return state.orders.find(order => (
+    order.id !== exceptOrderId
+    && orderTableKey(order.serviceInfo) === normalized
+    && orderIsActiveTableOrder(order)
+  )) || null;
+}
+
+function closeMoveOrderTableDialog(context = "orders") {
+  closeModal({ skipHistory: true });
+  if (context === "unpaid") {
+    openHeldOrders();
+  }
+}
+
+function moveOrderTableDialogHtml(order, context = "orders") {
+  const currentTable = order?.serviceInfo || "";
+  const title = context === "selforder" ? "Pindah Meja" : "Pindahkan Meja";
+  return `
+    <div class="section-title move-table-title">
+      <div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(displayOrderNumber(order?.number || "-"))}</p></div>
+      <button class="modal-close-x" type="button" onclick='closeMoveOrderTableDialog(${JSON.stringify(context)})' aria-label="Tutup">&times;</button>
+    </div>
+    <div class="move-table-card">
+      <label>
+        <span>Meja saat ini</span>
+        <strong>${escapeHtml(currentTable || "-")}</strong>
+      </label>
+      <label>
+        <span>Meja baru</span>
+        <input id="moveOrderTableInput" class="input" value="${escapeHtml(currentTable)}" placeholder="Contoh: A-2" autocomplete="off" />
+      </label>
+      <small>Masukkan kode meja baru. Jika meja baru masih punya pesanan aktif, pemindahan akan ditahan.</small>
+      <div class="toolbar">
+        <button class="btn" type="button" onclick='closeMoveOrderTableDialog(${JSON.stringify(context)})'>Batal</button>
+        <button class="btn green" type="button" onclick='confirmMoveOrderTable(${JSON.stringify(order?.id || "")}, ${JSON.stringify(context)})'>Pindahkan</button>
+      </div>
+    </div>
+  `;
+}
+
+function openMoveOrderTableDialog(orderId, context = "orders") {
+  const order = orderById(orderId);
+  if (!order) return toast("Pesanan tidak ditemukan.");
+  if (!canMoveOrderTable(order)) return toast("Pesanan ini tidak bisa dipindahkan meja.");
+  openModal(moveOrderTableDialogHtml(order, context), { skipHistory: true });
+  setTimeout(() => document.getElementById("moveOrderTableInput")?.focus({ preventScroll: true }), 0);
+}
+
+async function confirmMoveOrderTable(orderId, context = "orders") {
+  const order = orderById(orderId);
+  if (!order) return toast("Pesanan tidak ditemukan.");
+  const input = document.getElementById("moveOrderTableInput");
+  const nextTable = normalizeSelfOrderTableCode(input?.value || "");
+  if (!nextTable) {
+    input?.classList.add("invalid");
+    return toast("Masukkan kode meja yang benar.");
+  }
+  if (orderTableKey(nextTable) === orderTableKey(order.serviceInfo)) {
+    closeMoveOrderTableDialog(context);
+    return toast("Meja tidak berubah.");
+  }
+  if (supabaseReadable()) {
+    await refreshSelfOrderTableOrders(nextTable, { force: true, silent: true });
+  }
+  const occupied = activeOrderAtTable(nextTable, order.id);
+  if (occupied) {
+    return toast(`Meja ${nextTable} masih punya pesanan aktif.`);
+  }
+  const previousTable = order.serviceInfo || "-";
+  order.serviceInfo = nextTable;
+  order.updatedAt = new Date().toISOString();
+  saveState();
+  const synced = await syncOrderToSupabase(order, { silent: true });
+  if (!synced) {
+    order.serviceInfo = previousTable;
+    saveState();
+    return toast("Gagal memindahkan meja. Cek koneksi lalu coba lagi.");
+  }
+  if (context === "selforder") {
+    sessionStorage.setItem("self_order_table", nextTable);
+    saveSelfOrderLastOrderSnapshot(order, orderTotal(order), {
+      table: nextTable,
+      customer: order.customer || "",
+      appended: false,
+      batch: Math.max(1, ...((order.items || []).map(orderItemBatch)))
+    });
+  }
+  audit("Meja pesanan dipindahkan", `${order.number} ${previousTable} ke ${nextTable}`);
+  closeMoveOrderTableDialog(context);
+  toast(`Pesanan dipindahkan ke meja ${nextTable}.`);
+  if (context !== "unpaid") render();
 }
 
 function selfOrderActiveCategory() {
@@ -11743,6 +11877,7 @@ function orderCenterCard(order, options = {}) {
   `).join("");
   const actions = [
     order.paymentStatus !== "Lunas" && order.status !== "Dibatalkan" ? `<button class="btn green" type="button" onclick="event.preventDefault(); event.stopPropagation(); payUnpaidOrder('${order.id}')">Bayar</button>` : "",
+    canMoveOrderTable(order) ? `<button class="btn" type="button" onclick="event.preventDefault(); event.stopPropagation(); openMoveOrderTableDialog('${order.id}', ${options.returnToUnpaid ? "'unpaid'" : "'orders'"})">Pindahkan Meja</button>` : "",
     canCancelOrder(order) ? `<button class="btn red" type="button" onclick="event.preventDefault(); event.stopPropagation(); openCancelOrderDialog('${order.id}', ${options.returnToUnpaid ? "true" : "false"})">Batalkan</button>` : "",
     canDeleteOrderCard(order) ? `<button class="btn red" type="button" onclick="event.preventDefault(); event.stopPropagation(); openDeleteOrderDialog('${order.id}')">Hapus</button>` : ""
   ].filter(Boolean).join("");

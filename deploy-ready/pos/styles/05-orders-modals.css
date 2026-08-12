@@ -1243,6 +1243,39 @@
   font-size: 13px;
 }
 
+.move-table-card {
+  display: grid;
+  gap: 12px;
+}
+
+.move-table-card label {
+  display: grid;
+  gap: 6px;
+}
+
+.move-table-card label span,
+.move-table-card small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.move-table-card label strong {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid #d7dce7;
+  border-radius: 12px;
+  color: #1e3043;
+  background: #f8fafc;
+}
+
+.move-table-card .input.invalid {
+  border-color: #dc2626;
+  background: #fff7f7;
+}
+
 @media (max-width: 760px) {
   .view-orders .content {
     padding: 12px 10px 22px;

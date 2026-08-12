@@ -1,17 +1,53 @@
 // Page renderer extracted from app.js. Depends on shared helpers/globals in app.js.
 
-document.addEventListener("input", event => {
-  const input = event.target;
-  if (!input || !input.matches?.(".product-sales-search input")) return;
-  const cursorPosition = input.selectionStart ?? input.value.length;
-  requestAnimationFrame(() => {
-    const activeSearch = document.querySelector(".product-sales-search input");
-    if (!activeSearch) return;
-    activeSearch.focus({ preventScroll: true });
-    const safePosition = Math.min(cursorPosition, activeSearch.value.length);
-    activeSearch.setSelectionRange(safePosition, safePosition);
+function productReportQueryTokens(value) {
+  return String(value || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function productReportSearchText(row) {
+  return [row.name, row.displayName, row.code, row.source, row.periodLabel]
+    .map(value => String(value || "").toLowerCase())
+    .join(" ");
+}
+
+function productReportMatchesQuery(row, query) {
+  const tokens = productReportQueryTokens(query);
+  if (!tokens.length) return true;
+  const searchText = productReportSearchText(row);
+  return tokens.every(token => searchText.includes(token));
+}
+
+function setProductReportQuery(value) {
+  sessionStorage.setItem("product_report_query", value);
+  applyProductSalesSearchFilter(value);
+}
+
+function applyProductSalesSearchFilter(value = "") {
+  const tokens = productReportQueryTokens(value);
+  let visibleCount = 0;
+  let productQty = 0;
+  let productRevenue = 0;
+  let productProfit = 0;
+  const rows = document.querySelectorAll("[data-product-sales-row]");
+  rows.forEach(row => {
+    const searchText = String(row.dataset.productSearch || "");
+    const matched = !tokens.length || tokens.every(token => searchText.includes(token));
+    row.hidden = !matched;
+    if (!matched) return;
+    visibleCount += 1;
+    productQty += Number(row.dataset.productQty || 0);
+    productRevenue += Number(row.dataset.productRevenue || 0);
+    productProfit += Number(row.dataset.productProfit || 0);
   });
-}, true);
+  const qtyNode = document.querySelector("[data-product-sales-summary='qty']");
+  const revenueNode = document.querySelector("[data-product-sales-summary='revenue']");
+  const profitNode = document.querySelector("[data-product-sales-summary='profit']");
+  if (qtyNode) qtyNode.textContent = productQty.toLocaleString("id-ID");
+  if (revenueNode) revenueNode.textContent = money(productRevenue);
+  if (profitNode) profitNode.textContent = money(productProfit);
+  const emptyState = document.querySelector("[data-product-sales-empty]");
+  if (emptyState) emptyState.hidden = rows.length === 0 || visibleCount > 0;
+}
 
 function renderReports() {
   const range = reportRange();
@@ -110,22 +146,20 @@ function renderReports() {
     if (row.source) byProduct[key].source = row.source;
     byProduct[key].periods.add(productSalesPeriodLabel(row));
   }
-  const productSearch = (sessionStorage.getItem("product_report_query") || "").trim().toLowerCase();
-  const productReportRows = Object.entries(byProduct)
+  const productSearch = sessionStorage.getItem("product_report_query") || "";
+  const allProductReportRows = Object.entries(byProduct)
     .map(([name, data]) => ({ name, ...data, periodLabel: [...(data.periods || [])].join(", ") }))
-    .filter(row => {
-      if (!productSearch) return true;
-      return [row.name, row.code, row.source, row.periodLabel].some(value => String(value || "").toLowerCase().includes(productSearch));
-    })
     .sort((a, b) => b.qty - a.qty || b.value - a.value);
+  const productReportRows = allProductReportRows.filter(row => productReportMatchesQuery(row, productSearch));
   const productQty = productReportRows.reduce((sum, row) => sum + row.qty, 0);
   const productRevenue = productReportRows.reduce((sum, row) => sum + row.value, 0);
   const productProfit = productReportRows.reduce((sum, row) => sum + row.profit, 0);
-  const productReportList = productReportRows.map(row => {
+  const productReportList = allProductReportRows.map(row => {
     const title = row.displayName || row.name;
     const initials = title.split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join("").toUpperCase() || "PR";
+    const visible = productReportMatchesQuery(row, productSearch);
     return `
-      <div class="product-sales-row">
+      <div class="product-sales-row" data-product-sales-row data-product-search="${escapeHtml(productReportSearchText(row))}" data-product-qty="${Number(row.qty || 0)}" data-product-revenue="${Number(row.value || 0)}" data-product-profit="${Number(row.profit || 0)}" ${visible ? "" : "hidden"}>
         <span class="product-sales-avatar">${escapeHtml(initials)}</span>
         <div class="product-sales-main">
           <strong>${escapeHtml(title)}</strong>
@@ -261,16 +295,19 @@ function renderReports() {
       <section class="report-section-panel product-sales-panel">
         ${periodControls}
         <div class="product-sales-tools">
-          <label class="product-sales-search"><span>⌕</span><input value="${escapeHtml(sessionStorage.getItem("product_report_query") || "")}" placeholder="Cari nama atau kode barang" oninput="sessionStorage.setItem('product_report_query', this.value); render()" /></label>
+          <label class="product-sales-search"><span>⌕</span><input value="${escapeHtml(productSearch)}" placeholder="Cari nama atau kode barang" oninput="setProductReportQuery(this.value)" /></label>
         </div>
         <section class="product-sales-summary">
           <span>Qty Terjual</span>
-          <strong>${productQty.toLocaleString("id-ID")}</strong>
-          <div><small>Pendapatan</small><b>${money(productRevenue)}</b></div>
-          <div><small>Keuntungan</small><b>${money(productProfit)}</b></div>
+          <strong data-product-sales-summary="qty">${productQty.toLocaleString("id-ID")}</strong>
+          <div><small>Pendapatan</small><b data-product-sales-summary="revenue">${money(productRevenue)}</b></div>
+          <div><small>Keuntungan</small><b data-product-sales-summary="profit">${money(productProfit)}</b></div>
         </section>
         <div class="product-sales-notice">${productSalesFilterNote(range, legacyProductRows.length)}</div>
-        <div class="product-sales-list">${productReportList || empty("Belum ada rincian barang pada periode ini.")}</div>
+        <div class="product-sales-list">
+          ${productReportList || empty("Belum ada rincian barang pada periode ini.")}
+          <div data-product-sales-empty ${allProductReportRows.length && !productReportRows.length ? "" : "hidden"}>${empty("Barang tidak ditemukan pada periode ini.")}</div>
+        </div>
       </section>
     </div>
   `;
