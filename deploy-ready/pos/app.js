@@ -13,6 +13,7 @@ const IS_POS_APP = KASIRIN_APP_MODE === "pos";
 const STAFF_SESSION_KEY = "omnipos_active_staff_session";
 const STAFF_SESSION_CONFIRMED_KEY = "omnipos_staff_session_confirmed";
 const STAFF_SESSION_LOGOUT_KEY = "omnipos_staff_logged_out";
+const POS_CATEGORY_SCROLL_KEY = "pos_category_scroll";
 const SELF_ORDER_MENU_SCROLL_KEY = "self_order_menu_scroll_state";
 const SELF_ORDER_TABLE_CHOICE_KEY = "self_order_open_table_choice";
 const OPERATIONAL_CLEANUP_LAST_RUN_KEY = "kasirin_operational_cleanup_last_run";
@@ -6089,7 +6090,7 @@ function captureViewScrollState(targetView) {
   if (renderedView && renderedView !== targetView) return null;
   const selectors = [".content", ".page"];
   if (targetView === "pos") {
-    selectors.push(".pos-products-pane", ".pos-control-panel", ".product-list", ".cart-panel");
+    selectors.push(".pos-products-pane", ".pos-control-panel", ".category-cards", ".product-list", ".cart-panel");
   }
   return {
     view: targetView,
@@ -6124,7 +6125,7 @@ function capturePosPageScrollState() {
   return {
     windowX: window.scrollX || 0,
     windowY: window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0,
-    positions: [".content", ".page", ".pos-products-pane", ".pos-control-panel", ".product-list", ".cart-panel", ".cart-lines"]
+    positions: [".content", ".page", ".pos-products-pane", ".pos-control-panel", ".category-cards", ".product-list", ".cart-panel", ".cart-lines"]
       .map(selector => {
         const element = document.querySelector(selector);
         return element ? { selector, top: element.scrollTop || 0, left: element.scrollLeft || 0 } : null;
@@ -6142,7 +6143,20 @@ function restorePosPageScrollState(snapshot) {
       element.scrollTop = Number(top || 0);
       element.scrollLeft = Number(left || 0);
     });
+    restorePosCategoryScroll();
     window.scrollTo(Number(snapshot.windowX || 0), Number(snapshot.windowY || 0));
+  });
+}
+
+function rememberPosCategoryScroll(element) {
+  sessionStorage.setItem(POS_CATEGORY_SCROLL_KEY, String(element?.scrollLeft || 0));
+}
+
+function restorePosCategoryScroll() {
+  requestAnimationFrame(() => {
+    const categories = document.querySelector(".category-cards");
+    if (!categories) return;
+    categories.scrollLeft = Number(sessionStorage.getItem(POS_CATEGORY_SCROLL_KEY) || 0);
   });
 }
 
@@ -6355,6 +6369,7 @@ function render() {
   restoreSelfOrderCategoryScroll(false);
   restoreSelfOrderMenuScroll();
   restoreViewScrollState(scrollSnapshot);
+  if (view === "pos") restorePosCategoryScroll();
   if (view === "pos") hydratePosProductImages();
 }
 
@@ -8140,8 +8155,10 @@ function categoryCount(category) {
 }
 
 function setCategory(category) {
+  const currentCategories = document.querySelector(".category-cards");
+  if (currentCategories) rememberPosCategoryScroll(currentCategories);
   sessionStorage.setItem("pos_category", category);
-  refreshPosFast({ categories: true, productFilter: true, preserveScroll: false });
+  refreshPosFast({ categories: true, productFilter: true, preserveScroll: true });
 }
 
 function loadSelfOrderCart() {
@@ -9894,7 +9911,7 @@ function renderPosCategoryCards() {
   const snapshot = posProductSnapshot();
   const selected = selectedPosCategory();
   return `
-    <div class="category-cards">
+    <div class="category-cards" onscroll="rememberPosCategoryScroll(this)">
       ${snapshot.categories.map(cat => `<button class="category-card ${cat === selected ? "active" : ""}" type="button" onclick="setCategory(${JSON.stringify(cat).replaceAll('"', "&quot;")})"><strong>${escapeHtml(cat)}</strong><span>${snapshot.counts.get(cat) || 0} item</span></button>`).join("")}
     </div>
   `;
