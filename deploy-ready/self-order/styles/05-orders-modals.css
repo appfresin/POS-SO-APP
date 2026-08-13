@@ -1162,6 +1162,24 @@
   font-weight: 850;
 }
 
+.orders-item-group-note {
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(251, 191, 36, .42);
+  border-radius: 10px;
+  background: #fffbeb;
+  color: #78350f;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
+}
+
+.orders-item-group-note b {
+  color: #92400e;
+  font-weight: 900;
+}
+
 .orders-item-line span {
   min-width: 0;
   color: #0f172a;

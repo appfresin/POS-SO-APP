@@ -10933,7 +10933,8 @@ async function saveOrderPayLater() {
     const nextItems = cart.map(item => ({ ...item }));
     const orderBatch = Math.max(1, ...((existingOrder.items || []).map(orderItemBatch))) + 1;
     const updateCreatedAt = new Date().toISOString();
-    const additionalItems = prepareAdditionalOrderItems(existingOrder.items || [], nextItems, orderBatch, document.getElementById("orderNote")?.value || existingOrder.note || "", updateCreatedAt);
+    const submittedOrderNote = String(document.getElementById("orderNote")?.value || "").trim();
+    const additionalItems = prepareAdditionalOrderItems(existingOrder.items || [], nextItems, orderBatch, submittedOrderNote, updateCreatedAt);
     if (!additionalItems.length && subtotal === Number(existingOrder.subtotal || 0) && discount === Number(existingOrder.discount || 0)) {
       return toast("Belum ada tambahan pesanan.");
     }
@@ -10945,7 +10946,7 @@ async function saveOrderPayLater() {
     }
     existingOrder.customer = customerDisplayName(document.getElementById("customerName")?.value);
     existingOrder.serviceInfo = document.getElementById("serviceInfo")?.value || existingOrder.serviceInfo || "-";
-    existingOrder.note = document.getElementById("orderNote")?.value || existingOrder.note || "";
+    existingOrder.note = additionalItems.length ? (existingOrder.note || "") : submittedOrderNote;
     existingOrder.items = additionalItems.length ? [...(existingOrder.items || []), ...additionalItems] : nextItems;
     existingOrder.subtotal = subtotal;
     existingOrder.discount = discount;
@@ -11550,6 +11551,7 @@ async function cancelOrder(id, reason = "") {
       }
     }
   }
+  order.stockRestoredAt = order.stockRestoredAt || new Date().toISOString();
   audit("Pesanan dibatalkan", `${order.number}; ${order.cancelReason}; stok dikembalikan`);
   saveState();
   if (!remotelyRestored) {
@@ -11594,10 +11596,18 @@ async function deleteOrderCard(id) {
   deleteOrderProcessingIds.add(id);
   try {
     await deleteOrderFromSupabase(order);
+    const stockRestore = await restoreOrderStockBeforeDelete(order);
     state.orders = state.orders.filter(item => item.id !== id);
     state.syncQueue = (state.syncQueue || []).filter(item => item.orderId !== orderSyncQueueId(order) && item.orderNumber !== order.number);
-    audit("Pesanan dihapus Owner", `${order.number} ${order.serviceInfo || ""} ${order.customer || ""}`.trim());
+    audit("Pesanan dihapus Owner", `${order.number} ${order.serviceInfo || ""} ${order.customer || ""} stok ${stockRestore.restored ? "dikembalikan" : "tidak berubah"}`.trim());
     saveState();
+    if (stockRestore.remotelyRestored) {
+      loadMasterDataFromSupabase({ reason: "delete-order-stock-restore", force: true, silent: true });
+    } else if (stockRestore.touchedProductIds.length) {
+      Promise.resolve(syncProductsByIds(stockRestore.touchedProductIds))
+        .catch(error => console.error("Delete order product sync failed", error));
+    }
+    if (stockRestore.restored) broadcastRealtimeEvent("products");
     broadcastRealtimeEvent("orders");
     render();
     toast("Card pesanan dihapus.");
@@ -11607,6 +11617,49 @@ async function deleteOrderCard(id) {
   } finally {
     deleteOrderProcessingIds.delete(id);
   }
+}
+
+function orderStockAlreadyRestored(order) {
+  const number = String(order?.number || "").trim();
+  if (!order || order.stockRestoredAt) return true;
+  if (!number) return false;
+  return (state.stockMovements || []).some(movement => {
+    const reason = String(movement.reason || "");
+    return reason.includes(number) && (
+      reason.includes("Pembatalan")
+      || reason.includes("Hapus pesanan")
+    );
+  });
+}
+
+async function restoreOrderStockBeforeDelete(order) {
+  if (orderStockAlreadyRestored(order)) {
+    return { restored: false, remotelyRestored: false, touchedProductIds: [] };
+  }
+  const hasLimitedStock = (order?.items || []).some(item => {
+    const product = state.products.find(candidate => candidate.id === item.productId);
+    return item.stockTracked === true || limitedStockRequiresOnline(product, item.stockVariantKey || cartItemVariantKey(item));
+  });
+  const remotelyRestored = hasLimitedStock ? await restoreLimitedStockCommit(order.number) : false;
+  const touchedProductIds = applyLimitedStockItems(order.items, 1, `Hapus pesanan ${order.number}`);
+  for (const item of order.items || []) {
+    for (const addon of item.addons || []) {
+      const addonProduct = state.products.find(product => product.id === addon.id);
+      if (addonProduct?.trackStock) {
+        addonProduct.stock += addon.qty;
+        touchedProductIds.push(addonProduct.id);
+        state.stockMovements.unshift({ id: uid(), at: new Date().toISOString(), productId: addonProduct.id, productName: addonProduct.name, qty: addon.qty, reason: `Hapus pesanan add-on ${order.number}` });
+      }
+    }
+  }
+  if (touchedProductIds.length > 0 || remotelyRestored) {
+    order.stockRestoredAt = order.stockRestoredAt || new Date().toISOString();
+  }
+  return {
+    restored: touchedProductIds.length > 0 || remotelyRestored,
+    remotelyRestored,
+    touchedProductIds: [...new Set(touchedProductIds)]
+  };
 }
 
 async function deleteOrderFromSupabase(order) {
@@ -11939,18 +11992,21 @@ function orderCenterCard(order, options = {}) {
   }
   normalizeOrderBatches(order);
   const groups = groupedOrderItems(order);
-  const transactionNote = String(order.note || "").trim();
-  const itemPreview = groups.map(group => `
-    <div class="orders-item-group">
-      ${groups.length > 1 ? `<small>${escapeHtml(group.label)}</small>` : ""}
-      ${group.items.map(item => `
-        <div class="orders-item-line">
-          <span><b>${escapeHtml(orderItemInlineLabel(item))}</b>${orderItemNoteHtml(item, "orders-item-note")}</span>
-          <strong>${money(cartItemTotal(item))}</strong>
-        </div>
-      `).join("")}
-    </div>
-  `).join("");
+  const itemPreview = groups.map(group => {
+    const groupNote = orderGroupNote(order, group);
+    return `
+      <div class="orders-item-group">
+        ${groups.length > 1 ? `<small>${escapeHtml(group.label)}</small>` : ""}
+        ${groupNote ? `<p class="orders-item-group-note"><b>Catatan:</b> ${escapeHtml(groupNote)}</p>` : ""}
+        ${group.items.map(item => `
+          <div class="orders-item-line">
+            <span><b>${escapeHtml(orderItemInlineLabel(item))}</b>${orderItemNoteHtml(item, "orders-item-note")}</span>
+            <strong>${money(cartItemTotal(item))}</strong>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }).join("");
   const actions = [
     order.paymentStatus !== "Lunas" && order.status !== "Dibatalkan" ? `<button class="btn green" type="button" onclick="event.preventDefault(); event.stopPropagation(); payUnpaidOrder('${order.id}')">Bayar</button>` : "",
     canMoveOrderTable(order) ? `<button class="btn" type="button" onclick="event.preventDefault(); event.stopPropagation(); openMoveOrderTableDialog('${order.id}', ${options.returnToUnpaid ? "'unpaid'" : "'orders'"})">Pindahkan Meja</button>` : "",
@@ -11982,11 +12038,6 @@ function orderCenterCard(order, options = {}) {
         <span>${escapeHtml(customerDisplayName(order.customer))}</span>
         <span>${escapeHtml(order.paymentStatus || "-")}</span>
       </div>
-      ${transactionNote ? `
-        <div class="orders-transaction-note">
-          <span><b>Catatan :</b> ${escapeHtml(transactionNote)}</span>
-        </div>
-      ` : ""}
       <div class="orders-card-items">
         ${itemPreview || `<span class="muted">Belum ada rincian item.</span>`}
       </div>
