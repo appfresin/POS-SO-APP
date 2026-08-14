@@ -2,8 +2,8 @@
 const LOCAL_DB_NAME = "omnipos_local_db";
 const LOCAL_DB_VERSION = 1;
 const LOCAL_DB_STORE = "app_state";
-const SUPABASE_URL = "https://wuvmbxlkxiabydcmbztd.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind1dm1ieGxreGlhYnlkY21ienRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNDY4OTgsImV4cCI6MjA5NzcyMjg5OH0.0o4hXARRuU86XiqAjeccTS26wUKBmnKn1INn0H_aiRk";
+const SUPABASE_URL = "https://pjkotqianxecaawqompo.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBqa290cWlhbnhlY2Fhd3FvbXBvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY2NzM2MTQsImV4cCI6MjEwMjI0OTYxNH0.GkcoOopO65X1hYGDz6h6blHkwZSH7Pl3WNAvQWoGlJc";
 const LEGACY_CASHIER_SUPABASE_URL = "https://bznaicnbztwczckytcdn.supabase.co";
 const LEGACY_CASHIER_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ6bmFpY25ienR3Y3pja3l0Y2RuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQxMTI2MDMsImV4cCI6MjA5OTY4ODYwM30.Cv1bDv7_ISXjBfuIGMwcA6xmIbBwJA4NEQ3L1zHVxjQ";
 const KASIRIN_MEDIA_GAS_URL = "https://script.google.com/macros/s/AKfycbzfaJD-mBYGxRP9JU3hs5JjdHfJ9-KTu1_zjxlqRg2IDEhWbXTnUoIWG5xG5am-imgn/exec";
@@ -21,6 +21,11 @@ const OPERATIONAL_CLEANUP_RETENTION_DAYS = 31;
 const OPERATIONAL_CLEANUP_MIN_INTERVAL_HOURS = 20;
 const STALE_REMOTE_ORDER_GRACE_MS = 15 * 60 * 1000;
 const POS_PRODUCT_IMAGE_SIZE = 960;
+const EGRESS_SAVER_POLL_INTERVAL_MS = 60000;
+const EGRESS_SAVER_MASTER_FALLBACK_MS = 10 * 60000;
+const EGRESS_SAVER_ORDER_LIMIT = 120;
+const EGRESS_SAVER_ORDER_LOOKBACK_HOURS = 30;
+const EGRESS_SAVER_MASTER_CACHE_MS = 6 * 60000;
 
 const ORDER_STATUSES = [
   "Pesanan Baru",
@@ -192,6 +197,8 @@ let legacyProfitSummaryLoading = false;
 let legacyProfitSummaryLoadedAt = new Map();
 let dataRefreshLoading = false;
 let stockAvailabilitySyncLoading = false;
+let databaseMigrationLoading = false;
+let databaseMigrationStatus = "";
 let receiptLogoUploading = false;
 let receiptSettingsSaving = false;
 let selfOrderSettingsSaving = false;
@@ -420,7 +427,7 @@ window.addEventListener("online", () => {
   loadStoreSettingsFromSupabase({ reason: "online", force: true });
   loadMasterDataFromSupabase({ reason: "online" });
   refreshLimitedStockReservations({ reason: "online", reconcile: true });
-  loadRecentOrdersFromSupabase({ reason: "online", force: true });
+  if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "online", force: true });
   scheduleAutomaticOperationalCleanup("online");
   scheduleNativePushTokenRegistration("online", { force: true });
 });
@@ -437,7 +444,7 @@ setInterval(() => {
   processSyncQueue("interval");
   syncPendingStockMovements("interval");
 }, 60000);
-setInterval(() => pollRealtimeFallback(), 12000);
+setInterval(() => pollRealtimeFallback(), EGRESS_SAVER_POLL_INTERVAL_MS);
 setInterval(() => scheduleNativePushTokenRegistration("interval"), 180000);
 setInterval(() => autoAdvanceSelfOrderPromo(), SELF_ORDER_PROMO_INTERVAL_MS);
 
@@ -1656,7 +1663,7 @@ function initSupabase() {
     loadStoreSettingsFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
     loadMasterDataFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
     refreshLimitedStockReservations({ reason: "supabase-ready" });
-    loadRecentOrdersFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
+    if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
     scheduleAutomaticOperationalCleanup("supabase-ready");
     scheduleNativePushTokenRegistration("supabase-ready", { force: true });
     if (view === "reports") requestActiveReportData();
@@ -1669,7 +1676,7 @@ function initSupabase() {
     loadStoreSettingsFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
     loadMasterDataFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
     refreshLimitedStockReservations({ reason: "auth-change" });
-    loadRecentOrdersFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
+    if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
     scheduleAutomaticOperationalCleanup("auth-change");
     scheduleNativePushTokenRegistration("auth-change", { force: true });
     if (view === "reports") requestActiveReportData(true);
@@ -1680,12 +1687,17 @@ function initSupabase() {
 
 function setupSupabaseRealtime() {
   if (!supabaseClient || supabaseRealtimeChannels.length) return;
-  const channelConfigs = [
-    ["orders", ["orders", "order_items", "order_item_addons", "payments"]],
-    ["products", ["products", "product_addons", "addons", "categories", "stock_movements"]],
-    ["reservations", ["limited_stock_reservations"]],
-    ["settings", ["store_settings"]]
-  ];
+  const channelConfigs = IS_SELF_ORDER_APP
+    ? [
+        ["settings", ["store_settings"]],
+        ["products", ["products", "product_addons", "addons", "categories"]]
+      ]
+    : [
+        ["orders", ["orders", "order_items", "order_item_addons", "payments"]],
+        ["products", ["products", "product_addons", "addons", "categories"]],
+        ["reservations", ["limited_stock_reservations"]],
+        ["settings", ["store_settings"]]
+      ];
   supabaseRealtimeChannels = channelConfigs.map(([reason, tables]) => {
     let channel = supabaseClient.channel(`omnipos-${reason}-realtime`);
     tables.forEach(table => {
@@ -1737,18 +1749,19 @@ async function refreshRealtimeData(reasons) {
 }
 
 async function pollRealtimeFallback() {
+  if (IS_SELF_ORDER_APP) return;
   if (!supabaseReadable() || !localDbReady || navigator.onLine === false) return;
   const now = Date.now();
   const orderViews = new Set(["dashboard", "pos", "kitchen", "orders", "reports"]);
   const masterViews = new Set(["dashboard", "pos", "kitchen", "orders", "products", "stock", "stock-opname", "selforder", "settings"]);
   if (orderViews.has(view)) {
-    await loadRecentOrdersFromSupabase({ reason: "poll", force: true, silent: true });
+    await loadRecentOrdersFromSupabase({ reason: "poll", silent: true });
     if (view === "reports") requestActiveReportData(true);
   }
-  if (masterViews.has(view) && now - realtimeFallbackLastMasterAt > 45000) {
+  if (masterViews.has(view) && now - realtimeFallbackLastMasterAt > EGRESS_SAVER_MASTER_FALLBACK_MS) {
     realtimeFallbackLastMasterAt = now;
-    await loadStoreSettingsFromSupabase({ reason: "poll", force: true, silent: true });
-    await loadMasterDataFromSupabase({ reason: "poll", force: true, silent: true });
+    await loadStoreSettingsFromSupabase({ reason: "poll", silent: true });
+    await loadMasterDataFromSupabase({ reason: "poll", silent: true });
   }
 }
 
@@ -4226,6 +4239,172 @@ async function syncLegacySalesToSupabase(imported, fileName) {
   }
 }
 
+async function syncLegacyProductSalesToSupabase(imported, fileName) {
+  if (!supabaseWritable() || !imported.length) return false;
+  try {
+    const periodStart = imported.find(row => row.periodStart)?.periodStart || null;
+    const periodEnd = imported.find(row => row.periodEnd)?.periodEnd || null;
+    const { data: importRows, error: importError } = await supabaseClient
+      .from("legacy_product_sales_imports")
+      .insert({
+        file_name: fileName,
+        period_start: periodStart,
+        period_end: periodEnd,
+        row_count: imported.length,
+        raw_meta: { source: "local-migration" }
+      })
+      .select("id")
+      .single();
+    if (importError) throw importError;
+    const importId = importRows.id;
+    const rows = imported.map(row => ({
+      import_id: importId,
+      import_key: row.importKey || legacyProductSaleKey(row),
+      code: String(row.code || "").trim(),
+      name: row.name || "-",
+      transaction_count: Number(row.transactionCount || 0),
+      qty: Number(row.qty || 0),
+      revenue: Number(row.revenue || 0),
+      profit: Number(row.profit || 0),
+      period_start: row.periodStart || null,
+      period_end: row.periodEnd || null,
+      source: row.source || "Import Penjualan Barang Lama",
+      file_name: row.fileName || fileName,
+      raw_data: row.rawData || {}
+    }));
+    const { error } = await supabaseClient.from("legacy_product_sales").upsert(rows, { onConflict: "import_key" });
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error("Supabase legacy product sales sync failed", error);
+    toast(`Sync penjualan barang lama gagal: ${error.message}`);
+    return false;
+  }
+}
+
+function localMasterDataCount() {
+  return {
+    categories: (state.categories || []).filter(Boolean).length,
+    addons: (state.addons || []).filter(addon => addon && !isDeletedAddon(addon)).length,
+    products: (state.products || []).filter(product => product && !isDeletedProduct(product)).length
+  };
+}
+
+function hasLocalMasterData() {
+  const count = localMasterDataCount();
+  return Boolean(count.categories || count.addons || count.products);
+}
+
+function shouldProtectLocalMasterFromEmptyRemote(options, remoteCounts) {
+  if (options.allowEmptyRemoteOverwrite === true) return false;
+  if (!hasLocalMasterData()) return false;
+  return !remoteCounts.categories && !remoteCounts.addons && !remoteCounts.products;
+}
+
+function setDatabaseMigrationStatus(message) {
+  databaseMigrationStatus = message || "";
+  if (settingsTab === "data" && !isBlockingInteractionActive()) render();
+}
+
+async function migrateLocalDatabaseToSupabase(event) {
+  event?.preventDefault?.();
+  if (databaseMigrationLoading) return;
+  if (!canAttemptSupabaseSync()) return toast("Supabase baru belum siap. Coba refresh, lalu ulangi migrasi.");
+  const localCount = localMasterDataCount();
+  const orderCount = (state.orders || []).length;
+  const legacyCount = (state.importedSales || []).length;
+  const legacyProductCount = (state.importedProductSales || []).length;
+  const stockMovementCount = pendingStockMovements().length || (state.stockMovements || []).length;
+  if (!localCount.categories && !localCount.addons && !localCount.products && !orderCount && !legacyCount && !legacyProductCount) {
+    return toast("Tidak ada data lokal yang perlu dimigrasi.");
+  }
+
+  databaseMigrationLoading = true;
+  setDatabaseMigrationStatus("Menyiapkan migrasi...");
+  try {
+    const result = {
+      settings: false,
+      categories: 0,
+      addons: 0,
+      products: 0,
+      orders: 0,
+      stockMovements: 0,
+      legacySales: 0,
+      legacyProductSales: 0,
+      failed: []
+    };
+
+    setDatabaseMigrationStatus("Mengirim pengaturan toko...");
+    result.settings = await syncStoreSettingsToSupabase({ silent: true, requireJson: true });
+
+    for (const category of [...new Set(state.categories || [])].filter(Boolean)) {
+      setDatabaseMigrationStatus(`Mengirim kategori ${result.categories + 1}/${localCount.categories}...`);
+      const ok = await syncMasterEntity("category", categoryPayload(category), "upsert", { userInitiated: true });
+      if (ok) result.categories += 1;
+      else result.failed.push(`kategori:${category}`);
+    }
+
+    const addons = (state.addons || []).filter(addon => addon && !isDeletedAddon(addon));
+    for (const addon of addons) {
+      setDatabaseMigrationStatus(`Mengirim add-on ${result.addons + 1}/${addons.length}...`);
+      const ok = await syncMasterEntity("addon", addon, "upsert", { userInitiated: true });
+      if (ok) result.addons += 1;
+      else result.failed.push(`addon:${addon.name || addon.id}`);
+    }
+
+    const products = (state.products || []).filter(product => product && !isDeletedProduct(product));
+    for (const product of products) {
+      setDatabaseMigrationStatus(`Mengirim produk ${result.products + 1}/${products.length}...`);
+      const ok = await syncMasterEntity("product", product, "upsert", { userInitiated: true });
+      if (ok) result.products += 1;
+      else result.failed.push(`produk:${product.name || product.id}`);
+    }
+
+    const stockMovements = (state.stockMovements || []).filter(Boolean);
+    if (stockMovements.length) {
+      setDatabaseMigrationStatus(`Mengirim riwayat stok ${stockMovements.length} baris...`);
+      if (await syncStockMovementsToSupabase(stockMovements)) result.stockMovements = stockMovements.length;
+      else result.failed.push("riwayat stok");
+    }
+
+    const orders = (state.orders || []).filter(Boolean);
+    for (const order of orders) {
+      setDatabaseMigrationStatus(`Mengirim transaksi ${result.orders + 1}/${orders.length}...`);
+      const ok = await syncOrderToSupabase(order, { silent: true });
+      if (ok) result.orders += 1;
+      else result.failed.push(`order:${order.number || order.id}`);
+    }
+
+    if ((state.importedSales || []).length) {
+      setDatabaseMigrationStatus(`Mengirim ${state.importedSales.length} transaksi lama...`);
+      if (await syncLegacySalesToSupabase(state.importedSales, "Migrasi lokal")) result.legacySales = state.importedSales.length;
+      else result.failed.push("transaksi lama");
+    }
+
+    if ((state.importedProductSales || []).length) {
+      setDatabaseMigrationStatus(`Mengirim ${state.importedProductSales.length} penjualan barang lama...`);
+      if (await syncLegacyProductSalesToSupabase(state.importedProductSales, "Migrasi lokal")) result.legacyProductSales = state.importedProductSales.length;
+      else result.failed.push("penjualan barang lama");
+    }
+
+    await processSyncQueue("manual");
+    await loadStoreSettingsFromSupabase({ force: true, silent: true, reason: "local-migration-verify" });
+    await loadMasterDataFromSupabase({ force: true, silent: true, reason: "local-migration-verify" });
+    await loadRecentOrdersFromSupabase({ force: true, silent: true, reason: "local-migration-verify" });
+
+    const failedText = result.failed.length ? ` ${result.failed.length} item perlu dicek ulang.` : "";
+    setDatabaseMigrationStatus(`Selesai: ${result.products} produk, ${result.addons} add-on, ${result.orders} transaksi terkirim.${failedText}`);
+    toast(`Migrasi selesai. ${result.products} produk dan ${result.orders} transaksi terkirim.${failedText}`, 6000);
+  } catch (error) {
+    console.error("Local database migration failed", error);
+    setDatabaseMigrationStatus(`Migrasi berhenti: ${error.message}`);
+    toast(`Migrasi berhenti: ${error.message}`, 7000);
+  } finally {
+    databaseMigrationLoading = false;
+    if (!isBlockingInteractionActive()) render();
+  }
+}
+
 function clearLocalMasterDataForRemoteAuthority(options = {}) {
   if (!supabaseReadable()) return;
   if (view === "selforder" && !masterSyncLoaded && (state.products || []).length) return;
@@ -4579,9 +4758,15 @@ async function loadDeletedProductsLedgerFromSupabase() {
   }
 }
 
+function shouldLoadStockMovementsWithMaster(options = {}) {
+  if (options.includeStockMovements) return true;
+  if (IS_SELF_ORDER_APP) return false;
+  return ["products", "stock", "stock-opname"].includes(view);
+}
+
 async function loadMasterDataFromSupabase(options = {}) {
   if (!masterDataReadable() || masterSyncLoading || !localDbReady) return;
-  const freshEnough = Date.now() - masterSyncLoadedAt < 60000;
+  const freshEnough = Date.now() - masterSyncLoadedAt < EGRESS_SAVER_MASTER_CACHE_MS;
   if (!options.force && masterSyncLoaded && freshEnough) return;
   let shouldRenderMasterLoadFallback = false;
   masterSyncAttempted = true;
@@ -4639,11 +4824,25 @@ async function loadMasterDataFromSupabase(options = {}) {
       .filter(product => product.name);
     ({ products: serverProducts, addons: serverAddons } = mergePendingMasterSyncState(serverProducts, serverAddons));
 
+    const remoteCounts = {
+      categories: serverCategories.length,
+      addons: serverAddons.length,
+      products: serverProducts.length
+    };
+    if (shouldProtectLocalMasterFromEmptyRemote(options, remoteCounts)) {
+      masterSyncLoaded = false;
+      masterSyncLoadedAt = Date.now();
+      if (!options.silent) {
+        toast("Database baru masih kosong. Data lokal dipertahankan; jalankan Migrasi lokal ke Supabase.", 6500);
+      }
+      return false;
+    }
+
     state.categories = [...new Set(serverCategories)];
     state.addons = serverAddons;
     state.products = serverProducts;
     normalizeState();
-    await loadStockMovementsFromSupabase();
+    if (shouldLoadStockMovementsWithMaster(options)) await loadStockMovementsFromSupabase();
     saveState();
     await reconcileActiveLimitedStockCartReservations(options.reason || "master-load");
 
@@ -4671,13 +4870,13 @@ async function loadRecentOrdersFromSupabase(options = {}) {
   realtimeOrdersLoading = true;
   const previousNotificationKeys = new Set(orderNotificationKnownKeys);
   try {
-    const since = new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString();
+    const since = new Date(Date.now() - EGRESS_SAVER_ORDER_LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
     const { data: orderRows, error: orderError } = await supabaseClient
       .from("orders")
       .select("*")
       .or(`created_at.gte.${since},updated_at.gte.${since}`)
       .order("updated_at", { ascending: false })
-      .limit(300);
+      .limit(EGRESS_SAVER_ORDER_LIMIT);
     if (orderError) throw orderError;
     const orderIds = (orderRows || []).map(order => order.id).filter(Boolean);
     let itemRows = [];

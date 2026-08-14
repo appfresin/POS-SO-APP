@@ -5,6 +5,9 @@
   const TAKEAWAY_TYPE = "Take Away";
   const TAKEAWAY_ACTIVE_KEY = "so_takeaway_active_order";
   const TAKEAWAY_EXPIRY_MINUTES = 10;
+  const TAKEAWAY_STATUS_REFRESH_MS = 20000;
+  let soTakeawayStatusRefreshLoading = false;
+  let soTakeawayStatusRefreshAt = 0;
 
   function soTakeawayUrlParams() {
     try {
@@ -204,6 +207,79 @@
         || (takeawayNumber && soTakeawayNumber(order) === takeawayNumber)
       )
     )) || null;
+  }
+
+  function soTakeawayShouldRefreshStatus() {
+    if (!soTakeawayIsMode()) return false;
+    if (!(IS_SELF_ORDER_APP || view === "selforder")) return false;
+    if (sessionStorage.getItem("self_order_step") !== "success") return false;
+    const snapshot = soTakeawayLastSnapshot();
+    if (!snapshot) return false;
+    const order = soTakeawayFindOrder(snapshot);
+    return !order || (!soTakeawayIsExpired(order) && !soTakeawayKitchenAccepted(order));
+  }
+
+  async function soTakeawayRefreshActiveOrderFromSupabase(options = {}) {
+    if (!soTakeawayShouldRefreshStatus()) return false;
+    if (typeof supabaseReadable !== "function" || !supabaseReadable() || !localDbReady || soTakeawayStatusRefreshLoading) return false;
+    const now = Date.now();
+    if (!options.force && now - soTakeawayStatusRefreshAt < TAKEAWAY_STATUS_REFRESH_MS) return false;
+    const snapshot = soTakeawayLastSnapshot();
+    const number = String(snapshot?.number || snapshot?.takeawayNumber || "").trim();
+    if (!number) return false;
+    soTakeawayStatusRefreshLoading = true;
+    soTakeawayStatusRefreshAt = now;
+    try {
+      const { data: orderRows, error: orderError } = await supabaseClient
+        .from("orders")
+        .select("*")
+        .or(`order_number.eq.${number},service_info.eq.${number}`)
+        .order("updated_at", { ascending: false })
+        .limit(1);
+      if (orderError) throw orderError;
+      const orderRow = (orderRows || [])[0];
+      if (!orderRow?.id) return false;
+      const [itemsResult, paymentsResult] = await Promise.all([
+        supabaseClient.from("order_items").select("*").eq("order_id", orderRow.id).order("id", { ascending: true }),
+        supabaseClient.from("payments").select("*").eq("order_id", orderRow.id).order("paid_at", { ascending: false }).limit(1)
+      ]);
+      if (itemsResult.error) throw itemsResult.error;
+      if (paymentsResult.error) throw paymentsResult.error;
+      let addonRows = [];
+      const itemIds = (itemsResult.data || []).map(item => item.id).filter(Boolean);
+      if (itemIds.length) {
+        const { data, error } = await supabaseClient.from("order_item_addons").select("*").in("order_item_id", itemIds);
+        if (error) throw error;
+        addonRows = data || [];
+      }
+      const addonsByItemId = addonRows.reduce((map, addon) => {
+        const list = map.get(addon.order_item_id) || [];
+        list.push({
+          id: addon.addon_id || addon.addon_name,
+          name: addon.addon_name || "Tambahan",
+          qty: Number(addon.qty || 1),
+          price: Number(addon.price || 0),
+          cost: Number(addon.cost || 0)
+        });
+        map.set(addon.order_item_id, list);
+        return map;
+      }, new Map());
+      const liveOrder = normalizeSupabaseLiveOrder(
+        orderRow,
+        itemsResult.data || [],
+        addonsByItemId,
+        (paymentsResult.data || [])[0] || null
+      );
+      mergeSupabaseLiveOrders([liveOrder]);
+      saveState();
+      if (soTakeawayIsPaid(liveOrder) || soTakeawayKitchenAccepted(liveOrder)) render();
+      return true;
+    } catch (error) {
+      console.warn("Takeaway status refresh failed", error);
+      return false;
+    } finally {
+      soTakeawayStatusRefreshLoading = false;
+    }
   }
 
   function soTakeawayPaymentIcon({ paid = false, expired = false } = {}) {
@@ -765,6 +841,11 @@
     if (!window.__soTakeawayCountdownTimer) {
       window.__soTakeawayCountdownTimer = window.setInterval(soTakeawayUpdateCountdowns, 1000);
       window.setTimeout(soTakeawayUpdateCountdowns, 0);
+    }
+
+    if (!window.__soTakeawayStatusRefreshTimer) {
+      window.__soTakeawayStatusRefreshTimer = window.setInterval(soTakeawayRefreshActiveOrderFromSupabase, TAKEAWAY_STATUS_REFRESH_MS);
+      window.setTimeout(() => soTakeawayRefreshActiveOrderFromSupabase({ force: true }), 1200);
     }
   }
 
