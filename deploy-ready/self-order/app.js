@@ -7,6 +7,8 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const LEGACY_CASHIER_SUPABASE_URL = "https://bznaicnbztwczckytcdn.supabase.co";
 const LEGACY_CASHIER_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ6bmFpY25ienR3Y3pja3l0Y2RuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQxMTI2MDMsImV4cCI6MjA5OTY4ODYwM30.Cv1bDv7_ISXjBfuIGMwcA6xmIbBwJA4NEQ3L1zHVxjQ";
 const KASIRIN_MEDIA_GAS_URL = "https://script.google.com/macros/s/AKfycbzfaJD-mBYGxRP9JU3hs5JjdHfJ9-KTu1_zjxlqRg2IDEhWbXTnUoIWG5xG5am-imgn/exec";
+const SUPABASE_JS_CDN = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2";
+const XLSX_JS_CDN = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
 const KASIRIN_APP_MODE = window.KASIRIN_APP_MODE || "full";
 const IS_SELF_ORDER_APP = KASIRIN_APP_MODE === "self-order";
 const IS_POS_APP = KASIRIN_APP_MODE === "pos";
@@ -381,7 +383,7 @@ function waitForButtonFeedback(ms = 180) {
 seedOrderNotificationKnownKeys(state.orders);
 initializeAppMainHistory();
 syncSelfOrderTableFromUrl();
-initSupabase();
+loadSupabaseLibraryAsync();
 
 if (localRealtimeChannel) {
   localRealtimeChannel.onmessage = event => {
@@ -1667,7 +1669,68 @@ function parseReportDate(value) {
   return new Date(text);
 }
 
+function loadExternalScriptOnce(id, src, callbacks = {}) {
+  if (!document?.head) return Promise.reject(new Error("Dokumen belum siap memuat script."));
+  const existing = document.getElementById(id) || [...document.scripts].find(script => script.src === src);
+  if (existing?.dataset.loaded === "1") {
+    callbacks.onload?.();
+    return Promise.resolve(existing);
+  }
+  if (existing?.dataset.loading === "1") {
+    return new Promise((resolve, reject) => {
+      existing.addEventListener("load", () => {
+        callbacks.onload?.();
+        resolve(existing);
+      }, { once: true });
+      existing.addEventListener("error", () => {
+        callbacks.onerror?.();
+        reject(new Error(`Gagal memuat ${src}`));
+      }, { once: true });
+    });
+  }
+  const script = existing || document.createElement("script");
+  script.id = id;
+  script.src = src;
+  script.async = true;
+  script.dataset.loading = "1";
+  const promise = new Promise((resolve, reject) => {
+    script.addEventListener("load", () => {
+      script.dataset.loaded = "1";
+      delete script.dataset.loading;
+      callbacks.onload?.();
+      resolve(script);
+    }, { once: true });
+    script.addEventListener("error", () => {
+      delete script.dataset.loading;
+      callbacks.onerror?.();
+      reject(new Error(`Gagal memuat ${src}`));
+    }, { once: true });
+  });
+  if (!existing) document.head.appendChild(script);
+  return promise;
+}
+
+function loadSupabaseLibraryAsync() {
+  if (window.supabase?.createClient) {
+    initSupabase();
+    return Promise.resolve(window.supabase);
+  }
+  return loadExternalScriptOnce("supabase-js-cdn", SUPABASE_JS_CDN, {
+    onload: () => window.initSupabaseAfterLibraryLoad?.()
+  });
+}
+
+function loadXlsxLibraryAsync() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  return loadExternalScriptOnce("xlsx-js-cdn", XLSX_JS_CDN);
+}
+
+window.initSupabaseAfterLibraryLoad = function initSupabaseAfterLibraryLoad() {
+  initSupabase();
+};
+
 function initSupabase() {
+  if (supabaseClient) return;
   if (!window.supabase?.createClient) {
     supabaseStatus = "Library Supabase belum termuat.";
     return;
@@ -14104,6 +14167,7 @@ async function importLegacySales(event) {
   const files = [...(event.target.files || [])];
   if (!files.length) return;
   try {
+    if (files.some(file => /\.xlsx?$/i.test(file.name))) await loadXlsxLibraryAsync();
     const results = [];
     for (const file of files) {
       if (!window.XLSX) {
@@ -14221,6 +14285,7 @@ async function importLegacyProductSales(event) {
   const files = [...(event.target.files || [])];
   if (!files.length) return;
   try {
+    if (files.some(file => /\.xlsx?$/i.test(file.name))) await loadXlsxLibraryAsync();
     const results = [];
     for (const file of files) {
       if (!window.XLSX) {
