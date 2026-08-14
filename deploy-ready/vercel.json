@@ -12,6 +12,28 @@
       ],
       "destination": "https://fresin.id/:path*",
       "permanent": true
+    },
+    {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "pos-so-app.vercel.app"
+        }
+      ],
+      "destination": "https://fresin.id/:path*",
+      "permanent": true
+    },
+    {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "www.fresin.id"
+        }
+      ],
+      "destination": "https://fresin.id/:path*",
+      "permanent": true
     }
   ],
   "rewrites": [
