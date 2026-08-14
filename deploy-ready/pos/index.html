@@ -4,6 +4,18 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Cache-Control" content="no-store" />
+  <script>
+    (function () {
+      var legacyHosts = ["fresinapp.vercel.app", "pos-so-app.vercel.app", "fresin.id"];
+      if (legacyHosts.indexOf(window.location.hostname) === -1) return;
+      window.location.replace(
+        "https://www.fresin.id" +
+        window.location.pathname +
+        window.location.search +
+        window.location.hash
+      );
+    })();
+  </script>
   <title>Kasirin POS</title>
   <link rel="stylesheet" href="styles/01-foundation-layout.css?v=sync-refresh1" />
   <link rel="stylesheet" href="styles/02-dashboard-reports.css?v=report-period-menu1" />
