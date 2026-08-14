@@ -3,6 +3,8 @@
 function renderDashboard() {
   const period = dashboardPeriod();
   const range = dashboardPeriodRange(period);
+  const financialRange = dashboardReportRange(period, range);
+  requestDashboardReportData(financialRange);
   const periodOrders = state.orders.filter(order => isDashboardOrderInRange(order, range));
   const completed = periodOrders.filter(order => order.status === "Selesai" || order.paymentStatus === "Lunas");
   const active = periodOrders.filter(order => !["Selesai", "Dibatalkan"].includes(order.status));
@@ -14,9 +16,10 @@ function renderDashboard() {
   const productSoldOutAlerts = dashboardProductSoldOutAlerts();
   const rawMaterialAlertCount = dashboardRawMaterialAlerts(Number.POSITIVE_INFINITY).length;
   const productSoldOutAlertCount = dashboardProductSoldOutAlerts(Number.POSITIVE_INFINITY).length;
-  const sales = completed.reduce((sum, order) => sum + orderTotal(order), 0);
-  const profit = completed.reduce((sum, order) => sum + Number(order.profit ?? orderProfit(order) ?? 0), 0);
-  const avgOrder = completed.length ? Math.round(sales / completed.length) : 0;
+  const financialRecords = dashboardFinancialRecords(financialRange);
+  const sales = financialRecords.reduce((sum, record) => sum + Number(record.total || 0), 0);
+  const profit = financialRecords.reduce((sum, record) => sum + Number(record.profit || 0), 0);
+  const avgOrder = financialRecords.length ? Math.round(sales / financialRecords.length) : 0;
   const availableProducts = state.products.filter(product => product.active && !product.soldOut).length;
   const categories = productCategories();
   const latest = [...periodOrders].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 4);
@@ -269,6 +272,37 @@ function dashboardPeriodRange(period) {
 
   end.setDate(end.getDate() + 1);
   return { start, end };
+}
+
+function dashboardReportRange(period, range) {
+  const end = new Date(range.end);
+  end.setMilliseconds(end.getMilliseconds() - 1);
+  return {
+    period: `dashboard-${period || "today"}`,
+    start: range.start,
+    end,
+    label: dashboardPeriodLabel(period),
+    group: period === "month" || period === "week" ? "day" : "hour"
+  };
+}
+
+function requestDashboardReportData(range) {
+  if (!supabaseReadable() || !range) return;
+  const loadKey = reportLoadKey(range);
+  const freshEnough = Date.now() - supabaseReportsLoadedAt < 60000;
+  if (supabaseReportsLoading || (supabaseReportLoadKey === loadKey && freshEnough)) return;
+  Promise.resolve(loadSupabaseReportRecords(false, range)).then(() => {
+    if (view === "dashboard" && !isBlockingInteractionActive()) render();
+  });
+}
+
+function dashboardFinancialRecords(range) {
+  if (!range) return [];
+  const loadKey = reportLoadKey(range);
+  if (supabaseReportLoadKey === loadKey) {
+    return (supabaseReportRecords || []).filter(record => isReportableRecord(record) && recordInRange(record, range));
+  }
+  return reportSourceRecords(range);
 }
 
 function isDashboardOrderInRange(order, range) {

@@ -464,11 +464,6 @@ function renderStaffSettingsTab() {
 function renderDataSettingsTab() {
   const legacyCount = (state.importedSales || []).length;
   const legacyProductSalesCount = (state.importedProductSales || []).length;
-  const localCount = typeof localMasterDataCount === "function"
-    ? localMasterDataCount()
-    : { categories: (state.categories || []).length, addons: (state.addons || []).length, products: (state.products || []).length };
-  const orderCount = (state.orders || []).length;
-  const migrationSummary = `${localCount.products} produk, ${localCount.addons} add-on, ${localCount.categories} kategori, ${orderCount} transaksi lokal`;
   return `
     <section class="settings-panel settings-panel-wide settings-compact-panel">
       <div class="section-title">
@@ -489,17 +484,6 @@ function renderDataSettingsTab() {
             <span>${legacyProductSalesCount ? `${legacyProductSalesCount} baris` : "Belum ada data"}</span>
           </div>
           <label class="btn report-import-btn">Import<input type="file" accept=".xlsx,.xls,.csv" multiple onchange="importLegacyProductSales(event)" hidden /></label>
-        </div>
-      </div>
-      <div class="settings-import-combo">
-        <div class="settings-import-option settings-import-option-wide">
-          <div>
-            <h4>Migrasi lokal ke Supabase baru</h4>
-            <span>${escapeHtml(databaseMigrationStatus || migrationSummary)}</span>
-          </div>
-          <button class="btn accent report-import-btn" type="button" onclick="migrateLocalDatabaseToSupabase(event)" ${databaseMigrationLoading ? "disabled" : ""}>
-            ${databaseMigrationLoading ? "Memigrasi..." : "Mulai Migrasi"}
-          </button>
         </div>
       </div>
     </section>

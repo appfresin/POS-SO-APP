@@ -192,6 +192,7 @@ let supabaseReportLoadKey = "";
 let supabaseReportDetailCache = new Map();
 let profitSummaryCache = { years: [], months: {}, days: {} };
 let profitSummaryLoading = false;
+let profitSummaryLoadingKeys = new Set();
 let profitSummaryLoadedAt = new Map();
 let legacyProfitSummaryLoading = false;
 let legacyProfitSummaryLoadedAt = new Map();
@@ -2894,6 +2895,8 @@ function invalidateReportCaches() {
   supabaseReportRecords = [];
   supabaseReportDetailCache = new Map();
   profitSummaryCache = { years: [], months: {}, days: {} };
+  profitSummaryLoadingKeys = new Set();
+  profitSummaryLoading = false;
   profitSummaryLoadedAt = new Map();
   legacyProfitSummaryLoadedAt = new Map();
   legacyCashierDataLoadedAt = 0;
@@ -4833,7 +4836,7 @@ async function loadMasterDataFromSupabase(options = {}) {
       masterSyncLoaded = false;
       masterSyncLoadedAt = Date.now();
       if (!options.silent) {
-        toast("Database baru masih kosong. Data lokal dipertahankan; jalankan Migrasi lokal ke Supabase.", 6500);
+        toast("Database baru masih kosong. Data lokal dipertahankan agar tidak tertimpa data kosong.", 6500);
       }
       return false;
     }
@@ -5943,7 +5946,7 @@ async function loadSupabaseLegacyProfitSummary(level = "years", year = null, mon
 }
 
 async function loadProfitSummary(level = "years", year = null, month = null, force = false) {
-  if (!supabaseReadable() || profitSummaryLoading) return;
+  if (!supabaseReadable()) return;
   if (profitSummaryUnavailable) {
     await loadSupabaseLegacyProfitSummary(level, year, month, force);
     return;
@@ -5951,7 +5954,9 @@ async function loadProfitSummary(level = "years", year = null, month = null, for
   const dayKey = `${year}-${month}`;
   const cacheKey = legacyProfitSummaryCacheKey(level, year, month);
   const freshEnough = Date.now() - Number(profitSummaryLoadedAt.get(cacheKey) || 0) < 60000;
+  if (profitSummaryLoadingKeys.has(cacheKey)) return;
   if (!force && freshEnough) return;
+  profitSummaryLoadingKeys.add(cacheKey);
   profitSummaryLoading = true;
   try {
     let query;
@@ -5982,7 +5987,8 @@ async function loadProfitSummary(level = "years", year = null, month = null, for
       profitSummaryLoadedAt.set(cacheKey, Date.now());
     }
   } finally {
-    profitSummaryLoading = false;
+    profitSummaryLoadingKeys.delete(cacheKey);
+    profitSummaryLoading = profitSummaryLoadingKeys.size > 0;
     reportRenderAfterDataLoad();
   }
 }
@@ -6215,7 +6221,8 @@ function requestActiveReportData(force = false) {
       );
     }
     const detailRange = currentProfitDetailRange();
-    if (detailRange) loadSupabaseReportRecords(force, detailRange);
+    const recordRange = detailRange || profitReportRecordRange(level);
+    if (recordRange) loadSupabaseReportRecords(force, recordRange);
   } else if (section === "visitors") {
     loadSupabaseReportRecords(force);
   }
@@ -12072,10 +12079,12 @@ function orderListActivityAt(order) {
 
 function orderInOrdersRange(order, range) {
   if (!range) return true;
-  if (rawRecordInRange(order, range)) return true;
+  const createdAt = new Date(order?.createdAt || order?.created_at || 0);
+  if (!Number.isNaN(createdAt.getTime()) && createdAt >= range.start && createdAt <= range.end) return true;
   if (range.period !== "today") return false;
+  if (["Selesai", "Dibatalkan"].includes(order?.status) || order?.paymentStatus === "Lunas") return false;
   const activityAt = orderListActivityAt(order);
-  if (!activityAt || activityAt === order?.createdAt) return false;
+  if (!activityAt || activityAt === order?.createdAt || activityAt === order?.created_at) return false;
   const activityDate = new Date(activityAt);
   return activityDate >= range.start && activityDate <= range.end;
 }
