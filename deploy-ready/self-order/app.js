@@ -2338,7 +2338,7 @@ async function ensureNativePushSupabaseSession() {
 async function registerNativePushToken(options = {}) {
   if (nativePushTokenRegistering || !supabaseClient || !supabaseClient.functions?.invoke) return false;
   const session = await ensureNativePushSupabaseSession();
-  if (!session?.user) return false;
+  if (!session?.user && !isKasirinAndroidWebView()) return false;
   const token = await getNativeFcmToken();
   if (!token) return false;
   const target = nativePushTarget();
@@ -2346,7 +2346,7 @@ async function registerNativePushToken(options = {}) {
   const enabled = nativePushEnabledForTarget(target);
   const kitchenCategories = target === "dapur" ? deviceKitchenNotificationCategories() : [];
   setNativeKitchenNotificationCategories(kitchenCategories);
-  const registerKey = `${session.user.id}|${scopeKey}|${target}|${enabled ? "on" : "off"}|${kitchenCategories.join("\u001f")}|${token}`;
+  const registerKey = `${session?.user?.id || "native-anon"}|${scopeKey}|${target}|${enabled ? "on" : "off"}|${kitchenCategories.join("\u001f")}|${token}`;
   if (!options.force && nativePushTokenRegisterKey === registerKey) return true;
   nativePushTokenRegistering = true;
   try {
@@ -14562,10 +14562,12 @@ async function saveNotificationSettings(event) {
 async function testOrderNotification(button) {
   applyNotificationSettings(readNotificationSettingsFromForm(button));
   if (isKasirinAndroidWebView()) {
+    const selectedCategories = deviceKitchenNotificationCategories();
     const sent = showNativeOrderNotification({
       id: "test-order-notification",
       number: "TEST",
-      customer: "Contoh Pesanan"
+      customer: "Contoh Pesanan",
+      items: selectedCategories.map(category => ({ category }))
     });
     toast(sent ? "Tes notifikasi APK dikirim." : "Bridge notifikasi APK belum tersedia.");
     return;

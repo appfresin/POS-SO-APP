@@ -3565,6 +3565,13 @@
 
 .notification-action-row {
   margin-top: 0;
+  flex-wrap: wrap;
+}
+
+.notification-token-button.is-registered {
+  border-color: rgba(16, 129, 100, .28);
+  background: #e8f8ef;
+  color: #087c5f;
 }
 
 .settings-receipt-compact .receipt-paper {

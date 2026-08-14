@@ -2338,7 +2338,7 @@ async function ensureNativePushSupabaseSession() {
 async function registerNativePushToken(options = {}) {
   if (nativePushTokenRegistering || !supabaseClient || !supabaseClient.functions?.invoke) return false;
   const session = await ensureNativePushSupabaseSession();
-  if (!session?.user) return false;
+  if (!session?.user && !isKasirinAndroidWebView()) return false;
   const token = await getNativeFcmToken();
   if (!token) return false;
   const target = nativePushTarget();
@@ -2346,7 +2346,7 @@ async function registerNativePushToken(options = {}) {
   const enabled = nativePushEnabledForTarget(target);
   const kitchenCategories = target === "dapur" ? deviceKitchenNotificationCategories() : [];
   setNativeKitchenNotificationCategories(kitchenCategories);
-  const registerKey = `${session.user.id}|${scopeKey}|${target}|${enabled ? "on" : "off"}|${kitchenCategories.join("\u001f")}|${token}`;
+  const registerKey = `${session?.user?.id || "native-anon"}|${scopeKey}|${target}|${enabled ? "on" : "off"}|${kitchenCategories.join("\u001f")}|${token}`;
   if (!options.force && nativePushTokenRegisterKey === registerKey) return true;
   nativePushTokenRegistering = true;
   try {
@@ -2370,6 +2370,60 @@ async function registerNativePushToken(options = {}) {
     return false;
   } finally {
     nativePushTokenRegistering = false;
+  }
+}
+
+async function nativePushTokenIsRegistered(token) {
+  if (!token || !canAttemptSupabaseSync()) return false;
+  try {
+    const rows = await supabaseRestSelect("device_push_tokens", "id", {
+      fcm_token: `eq.${token}`,
+      is_active: "eq.true",
+      limit: "1"
+    });
+    return Array.isArray(rows) && rows.length > 0;
+  } catch (error) {
+    console.warn("Native push token verification failed", error);
+    return false;
+  }
+}
+
+async function registerDevicePushTokenFromSettings(button) {
+  applyNotificationSettings(readNotificationSettingsFromForm(button));
+  const stopLoading = beginButtonLoading(button, "Mendaftarkan...");
+  if (!stopLoading) return;
+  let confirmed = false;
+  try {
+    if (!isKasirinAndroidWebView()) {
+      toast("Daftar token hanya tersedia di APK.");
+      return;
+    }
+    const token = await getNativeFcmToken();
+    if (!token) {
+      toast("Token notifikasi belum tersedia. Buka ulang aplikasi lalu coba lagi.");
+      return;
+    }
+    const registered = await registerNativePushToken({ reason: "manual-token", force: true });
+    if (!registered) {
+      toast("Token belum berhasil didaftarkan. Periksa koneksi lalu coba lagi.");
+      return;
+    }
+    if (!(await nativePushTokenIsRegistered(token))) {
+      toast("Token terkirim, tapi belum terbaca di tabel. Coba tekan lagi.");
+      return;
+    }
+    confirmed = true;
+    toast("Token perangkat terdaftar.");
+  } catch (error) {
+    console.warn("Manual native push token registration failed", error);
+    toast(`Daftar token gagal. ${error.message || "Periksa koneksi."}`);
+  } finally {
+    stopLoading();
+    if (confirmed && button) {
+      button.classList.add("is-registered");
+      button.innerHTML = "✓ Terdaftar";
+      button.disabled = true;
+    }
   }
 }
 
@@ -14562,10 +14616,12 @@ async function saveNotificationSettings(event) {
 async function testOrderNotification(button) {
   applyNotificationSettings(readNotificationSettingsFromForm(button));
   if (isKasirinAndroidWebView()) {
+    const selectedCategories = deviceKitchenNotificationCategories();
     const sent = showNativeOrderNotification({
       id: "test-order-notification",
       number: "TEST",
-      customer: "Contoh Pesanan"
+      customer: "Contoh Pesanan",
+      items: selectedCategories.map(category => ({ category }))
     });
     toast(sent ? "Tes notifikasi APK dikirim." : "Bridge notifikasi APK belum tersedia.");
     return;

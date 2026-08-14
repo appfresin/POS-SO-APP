@@ -87,6 +87,7 @@ function renderNotificationSettingsTab() {
         </div>
         <div class="receipt-action-row notification-action-row">
           <button class="btn" type="button" onclick="openNativeNotificationSettings()">Atur nada Android</button>
+          <button class="btn notification-token-button" type="button" onclick="registerDevicePushTokenFromSettings(this)">Daftar token</button>
           <button class="btn" type="button" onclick="testOrderNotification(this)">Test notifikasi</button>
           <button class="btn accent settings-save-btn" type="submit">Simpan Notifikasi</button>
         </div>
