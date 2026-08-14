@@ -1,6 +1,19 @@
 {
   "cleanUrls": true,
   "trailingSlash": true,
+  "redirects": [
+    {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "fresinapp.vercel.app"
+        }
+      ],
+      "destination": "https://fresin.id/:path*",
+      "permanent": true
+    }
+  ],
   "rewrites": [
     {
       "source": "/pos",
