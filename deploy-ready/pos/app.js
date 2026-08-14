@@ -267,6 +267,7 @@ let orderNotificationAudioContext = null;
 let orderNotificationPermissionRequested = localStorage.getItem("omnipos_order_notification_permission_requested") === "1";
 const DEVICE_ORDER_NOTIFICATIONS_ENABLED_KEY = "kasirin_device_order_notifications_enabled";
 const DEVICE_KITCHEN_NOTIFICATION_CATEGORIES_KEY = "kasirin_device_kitchen_notification_categories";
+const NATIVE_PUSH_TOKEN_REGISTERED_KEY = "kasirin_native_push_token_registered_signature";
 let storeSettingsLoading = false;
 let storeSettingsLoadedAt = 0;
 let storeSettingsJsonUnavailable = false;
@@ -2270,6 +2271,41 @@ function nativePushScopeKey() {
     .slice(0, 80) || "default";
 }
 
+function nativePushRegistrationSignature() {
+  const target = nativePushTarget();
+  const kitchenCategories = target === "dapur" ? deviceKitchenNotificationCategories() : [];
+  return JSON.stringify({
+    scopeKey: nativePushScopeKey(),
+    target,
+    enabled: nativePushEnabledForTarget(target),
+    kitchenCategories
+  });
+}
+
+function markNativePushTokenRegistered() {
+  try {
+    localStorage.setItem(NATIVE_PUSH_TOKEN_REGISTERED_KEY, nativePushRegistrationSignature());
+  } catch (error) {
+    console.warn("Native push token registered marker failed", error);
+  }
+}
+
+function clearNativePushTokenRegistered() {
+  try {
+    localStorage.removeItem(NATIVE_PUSH_TOKEN_REGISTERED_KEY);
+  } catch (error) {
+    console.warn("Native push token registered marker clear failed", error);
+  }
+}
+
+function nativePushTokenRegistrationLooksRegistered() {
+  try {
+    return localStorage.getItem(NATIVE_PUSH_TOKEN_REGISTERED_KEY) === nativePushRegistrationSignature();
+  } catch {
+    return false;
+  }
+}
+
 function getNativeFcmToken() {
   const androidBridge = window.KasirinAndroid;
   const nativeBridge = window.KasirinNative;
@@ -2347,7 +2383,10 @@ async function registerNativePushToken(options = {}) {
   const kitchenCategories = target === "dapur" ? deviceKitchenNotificationCategories() : [];
   setNativeKitchenNotificationCategories(kitchenCategories);
   const registerKey = `${session?.user?.id || "native-anon"}|${scopeKey}|${target}|${enabled ? "on" : "off"}|${kitchenCategories.join("\u001f")}|${token}`;
-  if (!options.force && nativePushTokenRegisterKey === registerKey) return true;
+  if (!options.force && nativePushTokenRegisterKey === registerKey) {
+    markNativePushTokenRegistered();
+    return true;
+  }
   nativePushTokenRegistering = true;
   try {
     const { error } = await supabaseClient.functions.invoke("register-device-token", {
@@ -2364,6 +2403,7 @@ async function registerNativePushToken(options = {}) {
     });
     if (error) throw error;
     nativePushTokenRegisterKey = registerKey;
+    markNativePushTokenRegistered();
     return true;
   } catch (error) {
     console.warn("Native push token registration failed", error);
@@ -2409,6 +2449,7 @@ async function registerDevicePushTokenFromSettings(button) {
       return;
     }
     if (!(await nativePushTokenIsRegistered(token))) {
+      clearNativePushTokenRegistered();
       toast("Token terkirim, tapi belum terbaca di tabel. Coba tekan lagi.");
       return;
     }
@@ -2422,7 +2463,6 @@ async function registerDevicePushTokenFromSettings(button) {
     if (confirmed && button) {
       button.classList.add("is-registered");
       button.innerHTML = "✓ Terdaftar";
-      button.disabled = true;
     }
   }
 }

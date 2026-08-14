@@ -44,6 +44,7 @@ function renderNotificationSettingsTab() {
   const categories = productCategories();
   const selectedKitchenCategories = deviceKitchenNotificationCategories();
   const selectedKitchenKeys = new Set(selectedKitchenCategories.map(category => category.toLowerCase()));
+  const tokenRegistered = nativePushTokenRegistrationLooksRegistered();
   return `
     <section class="settings-panel settings-single-panel notification-settings-panel">
       <div class="section-title">
@@ -87,7 +88,7 @@ function renderNotificationSettingsTab() {
         </div>
         <div class="receipt-action-row notification-action-row">
           <button class="btn" type="button" onclick="openNativeNotificationSettings()">Atur nada Android</button>
-          <button class="btn notification-token-button" type="button" onclick="registerDevicePushTokenFromSettings(this)">Daftar token</button>
+          <button class="btn notification-token-button ${tokenRegistered ? "is-registered" : ""}" type="button" onclick="registerDevicePushTokenFromSettings(this)">${tokenRegistered ? "✓ Terdaftar" : "Daftar token"}</button>
           <button class="btn" type="button" onclick="testOrderNotification(this)">Test notifikasi</button>
           <button class="btn accent settings-save-btn" type="submit">Simpan Notifikasi</button>
         </div>
