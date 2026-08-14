@@ -12190,6 +12190,7 @@ function renderOrders() {
   const dateRange = ordersDateRange();
   const quickFilter = sessionStorage.getItem("orders_quick_filter") || "Semua";
   const query = sessionStorage.getItem("orders_query") || "";
+  requestReportOrderSummary(dateRange);
   const quickFilters = [
     ["Semua", "Semua"],
     ["Dine In", "Dine In"],
@@ -12202,16 +12203,20 @@ function renderOrders() {
   const processOrders = periodOrders.filter(order => order.status === "Sedang Disiapkan");
   const doneOrders = periodOrders.filter(order => order.status === "Selesai");
   const unpaid = periodOrders.filter(order => order.paymentStatus !== "Lunas" && order.status !== "Dibatalkan");
+  const orderSummary = reportOrderSummary(dateRange);
+  const reportOnlyOrders = reportOnlyCompletedOrders(dateRange, periodOrders);
   const filtered = periodOrders.filter(order => orderMatchesQuickFilter(order, quickFilter));
-  const ordered = filtered.slice().sort(ordersEntryStableSort);
+  const filteredReportOrders = reportOnlyOrders.filter(order => orderMatchesQuickFilter(order, quickFilter));
+  const ordered = [...filtered, ...filteredReportOrders].sort(ordersEntryStableSort);
   const visibleOrders = ordered.filter(order => orderMatchesSearch(order, query));
   const visibleSequences = orderSequenceMap(visibleOrders);
   const visibleCount = visibleOrders.length;
+  const doneCount = orderSummary.loaded ? orderSummary.totalDone : doneOrders.length;
   const statCards = [
     ["Baru", newOrders.length, "Pesanan", "Pesanan Baru", "new"],
     ["Diproses", processOrders.length, "Pesanan", "Sedang Disiapkan", "process"],
     ["Belum Lunas", unpaid.length, "Pesanan", "Belum Lunas", "unpaid"],
-    ["Selesai", doneOrders.length, "Pesanan", "Selesai", "done"]
+    ["Selesai", doneCount, "Pesanan", "Selesai", "done"]
   ];
   return `
     <section class="orders-page">
@@ -12252,7 +12257,7 @@ function renderOrders() {
 }
 
 function orderListActivityAt(order) {
-  return order?.updatedAt || order?.updated_at || order?.createdAt || order?.created_at || "";
+  return order?.paidAt || order?.paid_at || order?.updatedAt || order?.updated_at || order?.createdAt || order?.created_at || "";
 }
 
 function orderInOrdersRange(order, range) {
@@ -12372,6 +12377,35 @@ function orderCenterCard(order, options = {}) {
           <span>${escapeHtml(customerDisplayName(order.customer))}</span>
           <span>${escapeHtml(order.serviceInfo || "-")}</span>
           <span>${escapeHtml(order.type || "-")}</span>
+        </div>
+      </article>
+    `;
+  }
+  if (order.reportOnly) {
+    return `
+      <article class="orders-card is-done" ${searchAttributes}>
+        <div class="orders-card-head">
+          <div>
+            <div class="order-title-row">
+              ${orderSequenceBadge(options.sequenceNumber)}
+              <strong>${escapeHtml(displayOrderNumber(order.number))}</strong>
+            </div>
+            <span>${dateTime(order.paidAt || order.createdAt)}</span>
+          </div>
+          <span class="orders-status-pill done">Selesai</span>
+        </div>
+        <div class="orders-card-meta">
+          <span>${escapeHtml(order.type || "-")}</span>
+          <span>${escapeHtml(order.serviceInfo || "-")}</span>
+          <span>${escapeHtml(customerDisplayName(order.customer))}</span>
+          <span>Lunas</span>
+        </div>
+        <div class="orders-card-items">
+          <span class="muted">Ringkasan transaksi dari laporan.</span>
+        </div>
+        <div class="orders-card-total">
+          <span>Transaksi selesai</span>
+          <strong>${money(orderTotal(order))}</strong>
         </div>
       </article>
     `;
@@ -13763,6 +13797,79 @@ function reportSourceRecords(range = null) {
     if (!existing || (!existingHasItems && incomingHasItems)) merged.set(key, record);
   }
   return [...merged.values()].sort((a, b) => reportRecordTime(b) - reportRecordTime(a));
+}
+
+function normalizedOrderType(value) {
+  const text = String(value || "").trim();
+  const compact = text.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const match = ORDER_TYPES.find(type => type.id.toLowerCase().replace(/[^a-z0-9]+/g, "") === compact);
+  return match?.id || text || "Import";
+}
+
+function reportOrderSummaryLoadState(range) {
+  if (!range) return { loaded: false, loadKey: "" };
+  const loadKey = reportLoadKey(range);
+  const usingLegacyFallback = Boolean(supabaseReportRecordsUnavailable);
+  const loadedAt = usingLegacyFallback ? supabaseLegacyReportsLoadedAt : supabaseReportsLoadedAt;
+  const activeLoadKey = usingLegacyFallback ? supabaseLegacyReportLoadKey : supabaseReportLoadKey;
+  return {
+    loaded: Boolean(activeLoadKey === loadKey && loadedAt),
+    stale: !(activeLoadKey === loadKey && Date.now() - Number(loadedAt || 0) < 60000),
+    loadKey
+  };
+}
+
+function requestReportOrderSummary(range, force = false) {
+  if (!range || !supabaseReadable()) return;
+  const loadState = reportOrderSummaryLoadState(range);
+  const loading = supabaseReportsLoading || supabaseLegacyReportsLoading;
+  if (!force && (!loadState.stale || loading)) return;
+  const requestedKey = loadState.loadKey;
+  Promise.resolve(loadSupabaseReportRecords(force, range)).then(() => {
+    if (!["dashboard", "orders"].includes(view)) return;
+    if (isBlockingInteractionActive()) {
+      deferredRealtimeRender = true;
+      return;
+    }
+    if (reportLoadKey(range) === requestedKey) render();
+  });
+}
+
+function reportOrderSummary(range) {
+  const loadState = reportOrderSummaryLoadState(range);
+  const rows = reportSourceRecords(range).filter(record => isReportableRecord(record));
+  const byType = {};
+  rows.forEach(record => {
+    const type = normalizedOrderType(record.type || record.order_type);
+    byType[type] = (byType[type] || 0) + 1;
+  });
+  return { loaded: loadState.loaded, rows, byType, totalDone: rows.length };
+}
+
+function reportOnlyCompletedOrders(range, localOrders = []) {
+  const summary = reportOrderSummary(range);
+  if (!summary.loaded) return [];
+  const localKeys = new Set((localOrders || []).map(order => reportRecordKey(orderReportRecord(order))));
+  const localNumbers = new Set((localOrders || []).map(order => String(order?.number || "").trim()).filter(Boolean));
+  return summary.rows
+    .filter(record => !localKeys.has(reportRecordKey(record)) && !localNumbers.has(String(record?.number || "").trim()))
+    .map(record => ({
+      id: `report-${reportRecordKey(record)}`,
+      number: record.number,
+      createdAt: record.createdAt,
+      paidAt: record.paidAt,
+      source: record.source,
+      type: normalizedOrderType(record.type),
+      customer: record.customer,
+      serviceInfo: record.serviceInfo || "-",
+      status: "Selesai",
+      paymentStatus: "Lunas",
+      subtotal: Number(record.subtotal || record.total || 0),
+      discount: Number(record.discount || 0),
+      total: Number(record.total || 0),
+      items: record.items || [],
+      reportOnly: true
+    }));
 }
 
 async function deleteReportTransaction(recordKey) {
