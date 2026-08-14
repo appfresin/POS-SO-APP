@@ -3,6 +3,11 @@
   "trailingSlash": true,
   "redirects": [
     {
+      "source": "/",
+      "destination": "https://www.fresin.id/pos/",
+      "permanent": false
+    },
+    {
       "source": "/:path*",
       "has": [
         {
