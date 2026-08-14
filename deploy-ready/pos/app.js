@@ -4,8 +4,8 @@ const LOCAL_DB_VERSION = 1;
 const LOCAL_DB_STORE = "app_state";
 const SUPABASE_URL = "https://pjkotqianxecaawqompo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBqa290cWlhbnhlY2Fhd3FvbXBvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY2NzM2MTQsImV4cCI6MjEwMjI0OTYxNH0.GkcoOopO65X1hYGDz6h6blHkwZSH7Pl3WNAvQWoGlJc";
-const LEGACY_CASHIER_SUPABASE_URL = "https://bznaicnbztwczckytcdn.supabase.co";
-const LEGACY_CASHIER_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ6bmFpY25ienR3Y3pja3l0Y2RuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQxMTI2MDMsImV4cCI6MjA5OTY4ODYwM30.Cv1bDv7_ISXjBfuIGMwcA6xmIbBwJA4NEQ3L1zHVxjQ";
+const LEGACY_CASHIER_SUPABASE_URL = "https://osoiyzyrxrykkewdlrze.supabase.co";
+const LEGACY_CASHIER_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9zb2l5enlyeHJ5a2tld2RscnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY2OTIyNjMsImV4cCI6MjEwMjI2ODI2M30.xf0qXKu43DAX2m7kI5PJaI1O-cHajNQI1rPrq1EgYzQ";
 const KASIRIN_MEDIA_GAS_URL = "https://script.google.com/macros/s/AKfycbzfaJD-mBYGxRP9JU3hs5JjdHfJ9-KTu1_zjxlqRg2IDEhWbXTnUoIWG5xG5am-imgn/exec";
 const SUPABASE_JS_CDN = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2";
 const XLSX_JS_CDN = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
@@ -24,7 +24,9 @@ const OPERATIONAL_CLEANUP_MIN_INTERVAL_HOURS = 20;
 const STALE_REMOTE_ORDER_GRACE_MS = 15 * 60 * 1000;
 const POS_PRODUCT_IMAGE_SIZE = 960;
 const EGRESS_SAVER_POLL_INTERVAL_MS = 60000;
-const EGRESS_SAVER_MASTER_FALLBACK_MS = 10 * 60000;
+const EGRESS_SAVER_REALTIME_HEALTHY_MS = 2 * 60000;
+const EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS = 3 * 60000;
+const EGRESS_SAVER_MASTER_FALLBACK_MS = 30 * 60000;
 const EGRESS_SAVER_ORDER_LIMIT = 120;
 const EGRESS_SAVER_ORDER_LOOKBACK_HOURS = 30;
 const EGRESS_SAVER_MASTER_CACHE_MS = 6 * 60000;
@@ -237,6 +239,8 @@ const realtimePendingOrderIds = new Set();
 const realtimePendingOrderItemIds = new Set();
 let deletedOrderSweepLoadedAt = 0;
 let pendingNativePushOrderRefresh = null;
+let supabaseRealtimeLastHealthyAt = 0;
+let realtimeFallbackLastOrderAt = 0;
 let realtimeFallbackLastMasterAt = 0;
 const ORDER_NOTIFICATION_VIEWS = new Set(["kitchen", "orders"]);
 const ORDER_NOTIFICATION_DEDUPE_MS = 12000;
@@ -1786,6 +1790,7 @@ function setupSupabaseRealtime() {
     let channel = supabaseClient.channel(`omnipos-${reason}-realtime`);
     tables.forEach(table => {
       channel = channel.on("postgres_changes", { event: "*", schema: "public", table }, payload => {
+        markSupabaseRealtimeHealthy(reason);
         if (reason === "orders") queueRealtimeOrderDelta(table, payload);
         if (reason === "orders" && table === "orders" && payload?.eventType === "DELETE") {
           removeDeletedSupabaseOrderFromLocalState(payload.old);
@@ -1793,8 +1798,18 @@ function setupSupabaseRealtime() {
         scheduleRealtimeRefresh(reason);
       });
     });
-    return channel.subscribe();
+    return channel.subscribe(status => {
+      if (status === "SUBSCRIBED") markSupabaseRealtimeHealthy(reason);
+    });
   });
+}
+
+function markSupabaseRealtimeHealthy(reason = "") {
+  supabaseRealtimeLastHealthyAt = Date.now();
+}
+
+function supabaseRealtimeRecentlyHealthy(now = Date.now()) {
+  return supabaseRealtimeLastHealthyAt > 0 && now - supabaseRealtimeLastHealthyAt < EGRESS_SAVER_REALTIME_HEALTHY_MS;
 }
 
 function queueRealtimeOrderDelta(table, payload = {}) {
@@ -1885,8 +1900,13 @@ async function pollRealtimeFallback() {
   const orderViews = new Set(["dashboard", "pos", "kitchen", "orders", "reports"]);
   const masterViews = new Set(["dashboard", "pos", "kitchen", "orders", "products", "stock", "stock-opname", "selforder", "settings"]);
   if (orderViews.has(view)) {
-    await loadRecentOrdersFromSupabase({ reason: "poll", silent: true });
-    if (view === "reports") requestActiveReportData(true);
+    const realtimeHealthy = supabaseRealtimeRecentlyHealthy(now);
+    const orderFallbackDue = !realtimeHealthy || now - realtimeFallbackLastOrderAt > EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS;
+    if (orderFallbackDue) {
+      realtimeFallbackLastOrderAt = now;
+      await loadRecentOrdersFromSupabase({ reason: "poll", silent: true });
+      if (view === "reports") requestActiveReportData(true);
+    }
   }
   if (masterViews.has(view) && now - realtimeFallbackLastMasterAt > EGRESS_SAVER_MASTER_FALLBACK_MS) {
     realtimeFallbackLastMasterAt = now;
