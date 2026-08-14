@@ -21,7 +21,6 @@ function renderDashboard() {
   const sales = financialRecords.reduce((sum, record) => sum + Number(record.total || 0), 0);
   const profit = financialRecords.reduce((sum, record) => sum + Number(record.profit || 0), 0);
   const transactionCount = financialRecords.reduce((sum, record) => sum + Number(record.count || record.transaction_count || 1), 0);
-  const avgOrder = transactionCount ? Math.round(sales / transactionCount) : 0;
   const availableProducts = state.products.filter(product => product.active && !product.soldOut).length;
   const categories = productCategories();
   const latest = [...periodOrders].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 4);
@@ -44,7 +43,7 @@ function renderDashboard() {
   const quickStats = [
     ["Omzet", money(sales)],
     ["Laba Bersih", money(profit)],
-    ["Rata-rata", money(avgOrder)]
+    ["Transaksi", transactionCount.toLocaleString("id-ID")]
   ];
   const orderTypeStats = ORDER_TYPES.map(type => {
     const byType = periodOrders.filter(order => order.type === type.id);
