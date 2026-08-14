@@ -5,7 +5,6 @@ function renderDashboard() {
   const range = dashboardPeriodRange(period);
   const financialRange = dashboardReportRange(period, range);
   requestDashboardFinancialSummary(financialRange);
-  requestReportOrderSummary(financialRange);
   const periodOrders = state.orders.filter(order => isDashboardOrderInRange(order, range));
   const completed = periodOrders.filter(order => order.status === "Selesai" || order.paymentStatus === "Lunas");
   const active = periodOrders.filter(order => !["Selesai", "Dibatalkan"].includes(order.status));
@@ -18,7 +17,6 @@ function renderDashboard() {
   const rawMaterialAlertCount = dashboardRawMaterialAlerts(Number.POSITIVE_INFINITY).length;
   const productSoldOutAlertCount = dashboardProductSoldOutAlerts(Number.POSITIVE_INFINITY).length;
   const financialSummary = dashboardFinancialSummary(financialRange);
-  const orderSummary = reportOrderSummary(financialRange);
   const financialRecords = financialSummary.loaded ? financialSummary.rows : dashboardFallbackFinancialRecords(financialRange);
   const sales = financialRecords.reduce((sum, record) => sum + Number(record.total || 0), 0);
   const profit = financialRecords.reduce((sum, record) => sum + Number(record.profit || 0), 0);
@@ -49,14 +47,13 @@ function renderDashboard() {
   ];
   const orderTypeStats = ORDER_TYPES.map(type => {
     const byType = periodOrders.filter(order => order.type === type.id);
-    const reportDoneCount = Number(orderSummary.byType[type.id] || 0);
     return {
       id: type.id,
       title: type.title,
       total: byType.length,
       newCount: byType.filter(order => order.status === "Pesanan Baru").length,
       preparingCount: byType.filter(order => order.status === "Sedang Disiapkan").length,
-      doneCount: orderSummary.loaded ? reportDoneCount : byType.filter(order => order.status === "Selesai" || order.paymentStatus === "Lunas").length
+      doneCount: byType.filter(order => order.status === "Selesai" || order.paymentStatus === "Lunas").length
     };
   });
   return `
