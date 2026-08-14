@@ -4,7 +4,7 @@ function renderDashboard() {
   const period = dashboardPeriod();
   const range = dashboardPeriodRange(period);
   const financialRange = dashboardReportRange(period, range);
-  requestDashboardReportData(financialRange);
+  requestDashboardFinancialSummary(financialRange);
   const periodOrders = state.orders.filter(order => isDashboardOrderInRange(order, range));
   const completed = periodOrders.filter(order => order.status === "Selesai" || order.paymentStatus === "Lunas");
   const active = periodOrders.filter(order => !["Selesai", "Dibatalkan"].includes(order.status));
@@ -16,10 +16,12 @@ function renderDashboard() {
   const productSoldOutAlerts = dashboardProductSoldOutAlerts();
   const rawMaterialAlertCount = dashboardRawMaterialAlerts(Number.POSITIVE_INFINITY).length;
   const productSoldOutAlertCount = dashboardProductSoldOutAlerts(Number.POSITIVE_INFINITY).length;
-  const financialRecords = dashboardFinancialRecords(financialRange);
+  const financialSummary = dashboardFinancialSummary(financialRange);
+  const financialRecords = financialSummary.loaded ? financialSummary.rows : dashboardFallbackFinancialRecords(financialRange);
   const sales = financialRecords.reduce((sum, record) => sum + Number(record.total || 0), 0);
   const profit = financialRecords.reduce((sum, record) => sum + Number(record.profit || 0), 0);
-  const avgOrder = financialRecords.length ? Math.round(sales / financialRecords.length) : 0;
+  const transactionCount = financialRecords.reduce((sum, record) => sum + Number(record.count || record.transaction_count || 1), 0);
+  const avgOrder = transactionCount ? Math.round(sales / transactionCount) : 0;
   const availableProducts = state.products.filter(product => product.active && !product.soldOut).length;
   const categories = productCategories();
   const latest = [...periodOrders].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 4);
@@ -286,23 +288,63 @@ function dashboardReportRange(period, range) {
   };
 }
 
-function requestDashboardReportData(range) {
+function dashboardFinancialMonths(range) {
+  const months = [];
+  const current = new Date(range.start.getFullYear(), range.start.getMonth(), 1);
+  const last = new Date(range.end.getFullYear(), range.end.getMonth(), 1);
+  while (current <= last) {
+    months.push({ year: current.getFullYear(), month: current.getMonth() + 1 });
+    current.setMonth(current.getMonth() + 1);
+  }
+  return months;
+}
+
+function requestDashboardFinancialSummary(range) {
   if (!supabaseReadable() || !range) return;
-  const loadKey = reportLoadKey(range);
-  const freshEnough = Date.now() - supabaseReportsLoadedAt < 60000;
-  if (supabaseReportsLoading || (supabaseReportLoadKey === loadKey && freshEnough)) return;
-  Promise.resolve(loadSupabaseReportRecords(false, range)).then(() => {
+  const staleMonths = dashboardFinancialMonths(range).filter(({ year, month }) => {
+    const key = legacyProfitSummaryCacheKey("days", year, month);
+    const loadedAt = Math.max(
+      Number(profitSummaryLoadedAt.get(key) || 0),
+      Number(legacyProfitSummaryLoadedAt.get(key) || 0)
+    );
+    return !profitSummaryLoadingKeys.has(key) && Date.now() - loadedAt >= 60000;
+  });
+  if (!staleMonths.length) return;
+  Promise.all(staleMonths.map(({ year, month }) => loadProfitSummary("days", year, month, false))).then(() => {
     if (view === "dashboard" && !isBlockingInteractionActive()) render();
   });
 }
 
-function dashboardFinancialRecords(range) {
+function dashboardFinancialSummary(range) {
   if (!range) return [];
-  const loadKey = reportLoadKey(range);
-  if (supabaseReportLoadKey === loadKey) {
-    return (supabaseReportRecords || []).filter(record => isReportableRecord(record) && recordInRange(record, range));
+  const months = dashboardFinancialMonths(range);
+  const loaded = months.every(({ year, month }) => {
+    const key = legacyProfitSummaryCacheKey("days", year, month);
+    return profitSummaryLoadedAt.has(key) || legacyProfitSummaryLoadedAt.has(key);
+  });
+  const rows = months
+    .flatMap(({ year, month }) => profitSummaryCache.days[`${year}-${month}`] || [])
+    .filter(row => {
+      const date = new Date(`${row.salesDate || todayKey(new Date(row.year, Number(row.month || 1) - 1, row.day || 1))}T00:00:00`);
+      return !Number.isNaN(date.getTime()) && date >= range.start && date <= range.end;
+    });
+  return { loaded, rows };
+}
+
+function dashboardFallbackFinancialRecords(range) {
+  return reportSourceRecords(range).map(record => ({
+    total: Number(record.total || 0),
+    profit: Number(record.profit || 0),
+    count: 1
+  }));
+}
+
+function dashboardFinancialRecords(range) {
+  const summary = dashboardFinancialSummary(range);
+  if (summary.loaded) {
+    return summary.rows;
   }
-  return reportSourceRecords(range);
+  return dashboardFallbackFinancialRecords(range);
 }
 
 function isDashboardOrderInRange(order, range) {

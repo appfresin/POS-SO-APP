@@ -2038,6 +2038,43 @@
   font-size: 22px;
 }
 
+.self-order-success-actions {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.self-order-success-actions .self-order-primary,
+.self-order-success-actions .self-order-secondary {
+  width: 100%;
+  min-height: 44px;
+}
+
+.self-order-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(67, 94, 145, .24);
+  border-radius: 999px;
+  background: #f8fbff;
+  color: #274a7f;
+  font-size: 14px;
+  font-weight: 900;
+  box-shadow: 0 10px 22px rgba(30, 48, 67, .08);
+}
+
+.self-order-secondary:disabled {
+  opacity: .58;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.self-order-history-modal {
+  display: grid;
+  gap: 12px;
+}
+
 .self-order-admin-form {
   display: grid;
   grid-template-columns: minmax(260px, .72fr) minmax(320px, 1fr);

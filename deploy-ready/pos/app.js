@@ -26,6 +26,20 @@ const EGRESS_SAVER_MASTER_FALLBACK_MS = 10 * 60000;
 const EGRESS_SAVER_ORDER_LIMIT = 120;
 const EGRESS_SAVER_ORDER_LOOKBACK_HOURS = 30;
 const EGRESS_SAVER_MASTER_CACHE_MS = 6 * 60000;
+const EGRESS_SAVER_DELTA_OVERLAP_MS = 2 * 60000;
+const LIVE_ORDER_COLUMNS = "id,order_number,source,type,customer_name,service_info,note,status,payment_status,subtotal,discount,tax_amount,service_fee,delivery_fee,grand_total,print_receipt,prepared_items,created_at,updated_at,confirmed_at,prepared_at,ready_at,completed_at,cancelled_at,cancel_reason";
+const LIVE_ORDER_ITEM_COLUMNS = "id,order_id,product_name,sku,qty,price,cost,discount,variant_label,variant_data,note";
+const LIVE_ORDER_ADDON_COLUMNS = "order_item_id,addon_id,addon_name,qty,price,cost";
+const LIVE_ORDER_PAYMENT_COLUMNS = "order_id,method,received_amount,change_amount,payment_breakdown,paid_at";
+const REPORT_SALES_RECORD_COLUMNS = "id,number,created_at,paid_at,source,imported,order_type,customer_name,payment_method,payment_breakdown,payment_status,order_status,subtotal,discount,total,profit";
+const REPORT_PROFIT_YEAR_COLUMNS = "year,transaction_count,total,revenue,profit,estimated_cost";
+const REPORT_PROFIT_MONTH_COLUMNS = "year,month,transaction_count,total,revenue,profit,estimated_cost";
+const REPORT_PROFIT_DAY_COLUMNS = "year,month,day,sales_date,date,transaction_count,total,revenue,profit,estimated_cost";
+const STOCK_MOVEMENT_COLUMNS = "id,created_at,product_id,product_local_id,qty,reason,note,movement_type,balance_after";
+const MASTER_CATEGORY_COLUMNS = "id,local_id,name,active,sort_order";
+const MASTER_ADDON_COLUMNS = "id,local_id,name,price,cost,active,sold_out";
+const MASTER_PRODUCT_BASE_COLUMNS = "id,local_id,category_id,name,sku,description,price,cost,stock,min_stock,unit,track_stock,active,sold_out,prep_minutes,station,image_name,kitchen_note,channel_pos,channel_self_order,channel_delivery,variant_mode,variant_group,variant_required,variant_group2,variant_required2,variant_options,allowed_addon_ids,sold_out_variants,categories(id,name,local_id)";
+const MASTER_PRODUCT_COLUMNS = `${MASTER_PRODUCT_BASE_COLUMNS},stock_opname,stock_opname_checked_at,stock_opname_checked_by`;
 
 const ORDER_STATUSES = [
   "Pesanan Baru",
@@ -216,6 +230,9 @@ const realtimeRefreshReasons = new Set();
 let deferredRealtimeRender = false;
 let realtimeOrdersLoading = false;
 let realtimeOrdersLoadedAt = 0;
+let realtimeOrdersLastSyncedAt = "";
+const realtimePendingOrderIds = new Set();
+const realtimePendingOrderItemIds = new Set();
 let deletedOrderSweepLoadedAt = 0;
 let pendingNativePushOrderRefresh = null;
 let realtimeFallbackLastMasterAt = 0;
@@ -438,7 +455,9 @@ window.addEventListener("offline", () => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) scheduleNativePushTokenRegistration("visible", { force: true });
+  if (document.hidden) return;
+  scheduleNativePushTokenRegistration("visible", { force: true });
+  if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "visibility", force: true, silent: true });
 });
 
 setInterval(() => {
@@ -1703,6 +1722,7 @@ function setupSupabaseRealtime() {
     let channel = supabaseClient.channel(`omnipos-${reason}-realtime`);
     tables.forEach(table => {
       channel = channel.on("postgres_changes", { event: "*", schema: "public", table }, payload => {
+        if (reason === "orders") queueRealtimeOrderDelta(table, payload);
         if (reason === "orders" && table === "orders" && payload?.eventType === "DELETE") {
           removeDeletedSupabaseOrderFromLocalState(payload.old);
         }
@@ -1711,6 +1731,48 @@ function setupSupabaseRealtime() {
     });
     return channel.subscribe();
   });
+}
+
+function queueRealtimeOrderDelta(table, payload = {}) {
+  const next = payload.new || {};
+  const old = payload.old || {};
+  if (table === "orders") {
+    const id = next.id || old.id;
+    if (id) realtimePendingOrderIds.add(String(id));
+    return;
+  }
+  if (table === "order_items" || table === "payments") {
+    const orderId = next.order_id || old.order_id;
+    if (orderId) realtimePendingOrderIds.add(String(orderId));
+    return;
+  }
+  if (table === "order_item_addons") {
+    const itemId = next.order_item_id || old.order_item_id;
+    if (itemId) realtimePendingOrderItemIds.add(String(itemId));
+  }
+}
+
+async function takeRealtimePendingOrderIds() {
+  const ids = new Set(realtimePendingOrderIds);
+  realtimePendingOrderIds.clear();
+  if (realtimePendingOrderItemIds.size && supabaseReadable()) {
+    const itemIds = [...realtimePendingOrderItemIds];
+    realtimePendingOrderItemIds.clear();
+    for (let index = 0; index < itemIds.length; index += 100) {
+      const chunk = itemIds.slice(index, index + 100);
+      const { data, error } = await supabaseClient
+        .from("order_items")
+        .select("id,order_id")
+        .in("id", chunk);
+      if (error) {
+        chunk.forEach(itemId => realtimePendingOrderItemIds.add(itemId));
+        console.warn("Realtime order item delta resolve failed", error);
+        break;
+      }
+      (data || []).forEach(row => row?.order_id && ids.add(String(row.order_id)));
+    }
+  }
+  return [...ids].filter(Boolean);
 }
 
 function broadcastRealtimeEvent(reason) {
@@ -1745,7 +1807,10 @@ async function refreshRealtimeData(reasons) {
   if (shouldLoadSettings) await loadStoreSettingsFromSupabase({ reason: "realtime", force: true, silent: true });
   if (shouldLoadProducts) await loadMasterDataFromSupabase({ reason: "realtime", force: true, silent: true });
   if (shouldLoadReservations) await refreshLimitedStockReservations({ reason: "realtime", render: true });
-  if (shouldLoadOrders) await loadRecentOrdersFromSupabase({ reason: "realtime", force: true, silent: true });
+  if (shouldLoadOrders) {
+    const orderIds = await takeRealtimePendingOrderIds();
+    await loadRecentOrdersFromSupabase({ reason: "realtime", force: true, silent: true, orderIds });
+  }
   if (view === "reports" && shouldLoadOrders) requestActiveReportData(true);
 }
 
@@ -2554,21 +2619,72 @@ async function supabaseRestSelect(table, select, params = {}) {
   return response.json();
 }
 
-async function selectMasterDataFromSupabase(addonColumns) {
-  if (supabaseReadable()) {
-    const [categoryResult, addonResult, productResult, productAddonResult] = await Promise.all([
-      supabaseClient.from("categories").select("id,local_id,name,active,sort_order").order("name", { ascending: true }),
-      supabaseClient.from("addons").select(addonColumns).order("name", { ascending: true }),
-      supabaseClient.from("products").select("*, categories(id,name,local_id)").order("name", { ascending: true }),
-      supabaseClient.from("product_addons").select("product_id,addon_id")
-    ]);
-    return { categoryResult, addonResult, productResult, productAddonResult };
+function isMissingSupabaseTableError(error, tableName = "") {
+  const text = [
+    error?.code,
+    error?.message,
+    error?.details,
+    error?.hint
+  ].filter(Boolean).join(" ").toLowerCase();
+  const table = String(tableName || "").toLowerCase();
+  return error?.code === "42P01"
+    || error?.code === "PGRST205"
+    || (text.includes("schema cache") && (!table || text.includes(table)))
+    || (text.includes("could not find the table") && (!table || text.includes(table)))
+    || (text.includes("relation") && text.includes("does not exist") && (!table || text.includes(table)));
+}
+
+async function selectCategoriesFromSupabase() {
+  const result = supabaseReadable()
+    ? await supabaseClient.from("categories").select(MASTER_CATEGORY_COLUMNS).order("name", { ascending: true })
+    : await supabaseRestSelect("categories", MASTER_CATEGORY_COLUMNS, { order: "name.asc", limit: "5000" })
+      .then(data => ({ data, error: null }))
+      .catch(error => ({ data: null, error }));
+  if (isMissingSupabaseTableError(result.error, "categories")) return { data: [], error: null };
+  return result;
+}
+
+async function selectAddonsFromSupabase(addonColumns) {
+  const columns = addonColumns || MASTER_ADDON_COLUMNS;
+  const result = supabaseReadable()
+    ? await supabaseClient.from("addons").select(columns).order("name", { ascending: true })
+    : await supabaseRestSelect("addons", columns, { order: "name.asc", limit: "5000" })
+      .then(data => ({ data, error: null }))
+      .catch(error => ({ data: null, error }));
+  if (isMissingSupabaseTableError(result.error, "addons")) return { data: [], error: null };
+  return result;
+}
+
+async function selectProductsFromSupabase() {
+  const selectProducts = columns => supabaseReadable()
+    ? supabaseClient.from("products").select(columns).order("name", { ascending: true })
+    : supabaseRestSelect("products", columns, { order: "name.asc", limit: "5000" })
+      .then(data => ({ data, error: null }))
+      .catch(error => ({ data: null, error }));
+  let result = await selectProducts(MASTER_PRODUCT_COLUMNS);
+  if (result.error && isSupabaseMissingRelationOrColumnError(result.error)) {
+    result = await selectProducts(MASTER_PRODUCT_BASE_COLUMNS);
   }
+  if (isMissingSupabaseTableError(result.error, "products")) return { data: [], error: null };
+  return result;
+}
+
+async function selectProductAddonsFromSupabase() {
+  const result = supabaseReadable()
+    ? await supabaseClient.from("product_addons").select("product_id,addon_id")
+    : await supabaseRestSelect("product_addons", "product_id,addon_id", { limit: "5000" })
+      .then(data => ({ data, error: null }))
+      .catch(error => ({ data: null, error }));
+  if (isMissingSupabaseTableError(result.error, "product_addons")) return { data: [], error: null };
+  return result;
+}
+
+async function selectMasterDataFromSupabase(addonColumns) {
   const [categoryResult, addonResult, productResult, productAddonResult] = await Promise.all([
-    supabaseRestSelect("categories", "id,local_id,name,active,sort_order", { order: "name.asc", limit: "5000" }).then(data => ({ data, error: null })).catch(error => ({ data: null, error })),
-    supabaseRestSelect("addons", addonColumns, { order: "name.asc", limit: "5000" }).then(data => ({ data, error: null })).catch(error => ({ data: null, error })),
-    supabaseRestSelect("products", "*, categories(id,name,local_id)", { order: "name.asc", limit: "5000" }).then(data => ({ data, error: null })).catch(error => ({ data: null, error })),
-    supabaseRestSelect("product_addons", "product_id,addon_id", { limit: "5000" }).then(data => ({ data, error: null })).catch(error => ({ data: null, error }))
+    selectCategoriesFromSupabase(),
+    selectAddonsFromSupabase(addonColumns),
+    selectProductsFromSupabase(),
+    selectProductAddonsFromSupabase()
   ]);
   return { categoryResult, addonResult, productResult, productAddonResult };
 }
@@ -2637,13 +2753,13 @@ async function loadStockMovementsFromSupabase(options = {}) {
   try {
     let { data, error } = await supabaseClient
       .from("stock_movements")
-      .select("*, products(local_id,name)")
+      .select(`${STOCK_MOVEMENT_COLUMNS}, products(local_id,name)`)
       .order("created_at", { ascending: false })
       .limit(300);
     if (error) {
       const { data: fallbackData, error: fallbackError } = await supabaseClient
         .from("stock_movements")
-        .select("*")
+        .select(STOCK_MOVEMENT_COLUMNS)
         .order("created_at", { ascending: false })
         .limit(300);
       data = fallbackData;
@@ -4866,6 +4982,20 @@ async function loadMasterDataFromSupabase(options = {}) {
   }
 }
 
+function liveOrderInitialSince() {
+  return new Date(Date.now() - EGRESS_SAVER_ORDER_LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
+}
+
+function liveOrderSyncSince(options = {}) {
+  const initialSince = liveOrderInitialSince();
+  const lastSyncMs = Date.parse(realtimeOrdersLastSyncedAt || "");
+  if (!Number.isFinite(lastSyncMs)) return initialSince;
+  const deltaReasons = new Set(["realtime", "poll", "native-push", "online", "visibility"]);
+  if (!deltaReasons.has(options.reason || "")) return initialSince;
+  const deltaSince = new Date(Math.max(Date.parse(initialSince), lastSyncMs - EGRESS_SAVER_DELTA_OVERLAP_MS)).toISOString();
+  return deltaSince;
+}
+
 async function loadRecentOrdersFromSupabase(options = {}) {
   if (!supabaseReadable() || realtimeOrdersLoading || !localDbReady) return;
   const freshEnough = Date.now() - realtimeOrdersLoadedAt < 15000;
@@ -4873,13 +5003,19 @@ async function loadRecentOrdersFromSupabase(options = {}) {
   realtimeOrdersLoading = true;
   const previousNotificationKeys = new Set(orderNotificationKnownKeys);
   try {
-    const since = new Date(Date.now() - EGRESS_SAVER_ORDER_LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
-    const { data: orderRows, error: orderError } = await supabaseClient
+    const targetOrderIds = [...new Set((options.orderIds || []).map(id => String(id || "").trim()).filter(Boolean))];
+    const since = liveOrderSyncSince(options);
+    let orderQuery = supabaseClient
       .from("orders")
-      .select("*")
-      .or(`created_at.gte.${since},updated_at.gte.${since}`)
+      .select(LIVE_ORDER_COLUMNS)
       .order("updated_at", { ascending: false })
       .limit(EGRESS_SAVER_ORDER_LIMIT);
+    if (targetOrderIds.length) {
+      orderQuery = orderQuery.in("id", targetOrderIds.slice(0, EGRESS_SAVER_ORDER_LIMIT));
+    } else {
+      orderQuery = orderQuery.or(`created_at.gte.${since},updated_at.gte.${since}`);
+    }
+    const { data: orderRows, error: orderError } = await orderQuery;
     if (orderError) throw orderError;
     const orderIds = (orderRows || []).map(order => order.id).filter(Boolean);
     let itemRows = [];
@@ -4887,8 +5023,8 @@ async function loadRecentOrdersFromSupabase(options = {}) {
     let paymentRows = [];
     if (orderIds.length) {
       const [itemsResult, paymentsResult] = await Promise.all([
-        supabaseClient.from("order_items").select("*").in("order_id", orderIds).order("id", { ascending: true }),
-        supabaseClient.from("payments").select("*").in("order_id", orderIds).order("paid_at", { ascending: false })
+        supabaseClient.from("order_items").select(LIVE_ORDER_ITEM_COLUMNS).in("order_id", orderIds).order("id", { ascending: true }),
+        supabaseClient.from("payments").select(LIVE_ORDER_PAYMENT_COLUMNS).in("order_id", orderIds).order("paid_at", { ascending: false })
       ]);
       if (itemsResult.error) throw itemsResult.error;
       if (paymentsResult.error) throw paymentsResult.error;
@@ -4896,7 +5032,7 @@ async function loadRecentOrdersFromSupabase(options = {}) {
       paymentRows = paymentsResult.data || [];
       const itemIds = itemRows.map(item => item.id).filter(Boolean);
       if (itemIds.length) {
-        const { data, error } = await supabaseClient.from("order_item_addons").select("*").in("order_item_id", itemIds);
+        const { data, error } = await supabaseClient.from("order_item_addons").select(LIVE_ORDER_ADDON_COLUMNS).in("order_item_id", itemIds);
         if (error) throw error;
         addonRows = data || [];
       }
@@ -4931,13 +5067,14 @@ async function loadRecentOrdersFromSupabase(options = {}) {
       paymentsByOrderId.get(row.id)
     ));
     mergeSupabaseLiveOrders(serverOrders, {
-      pruneMissingSynced: true,
-      complete: (orderRows || []).length < 300,
+      pruneMissingSynced: !targetOrderIds.length,
+      complete: (orderRows || []).length < EGRESS_SAVER_ORDER_LIMIT,
       since
     });
     await pruneDeletedSyncedOrdersFromSupabase({ reason: options.reason || "orders" });
     notifyIncomingOrders(state.orders, previousNotificationKeys, options.reason || "");
     realtimeOrdersLoadedAt = Date.now();
+    if (!targetOrderIds.length) realtimeOrdersLastSyncedAt = new Date().toISOString();
     if (shouldRenderAfterRealtimeLoad("orders")) render();
   } catch (error) {
     console.error("Supabase live order load failed", error);
@@ -5327,7 +5464,7 @@ async function loadSelfOrderTableOrdersFromSupabase(table, options = {}) {
     const tableValues = selfOrderTableLookupValues(table);
     let orderQuery = supabaseClient
       .from("orders")
-      .select("*")
+      .select(LIVE_ORDER_COLUMNS)
       .neq("payment_status", "Lunas")
       .neq("status", "Dibatalkan")
       .order("updated_at", { ascending: false })
@@ -5342,8 +5479,8 @@ async function loadSelfOrderTableOrdersFromSupabase(table, options = {}) {
     let paymentRows = [];
     if (orderIds.length) {
       const [itemsResult, paymentsResult] = await Promise.all([
-        supabaseClient.from("order_items").select("*").in("order_id", orderIds).order("id", { ascending: true }),
-        supabaseClient.from("payments").select("*").in("order_id", orderIds).order("paid_at", { ascending: false })
+        supabaseClient.from("order_items").select(LIVE_ORDER_ITEM_COLUMNS).in("order_id", orderIds).order("id", { ascending: true }),
+        supabaseClient.from("payments").select(LIVE_ORDER_PAYMENT_COLUMNS).in("order_id", orderIds).order("paid_at", { ascending: false })
       ]);
       if (itemsResult.error) throw itemsResult.error;
       if (paymentsResult.error) throw paymentsResult.error;
@@ -5351,7 +5488,7 @@ async function loadSelfOrderTableOrdersFromSupabase(table, options = {}) {
       paymentRows = paymentsResult.data || [];
       const itemIds = itemRows.map(item => item.id).filter(Boolean);
       if (itemIds.length) {
-        const { data, error } = await supabaseClient.from("order_item_addons").select("*").in("order_item_id", itemIds);
+        const { data, error } = await supabaseClient.from("order_item_addons").select(LIVE_ORDER_ADDON_COLUMNS).in("order_item_id", itemIds);
         if (error) throw error;
         addonRows = data || [];
       }
@@ -5456,7 +5593,7 @@ async function loadSupabaseOrderDetailForReport(record) {
   try {
     const { data: orderRow, error: orderError } = await supabaseClient
       .from("orders")
-      .select("*")
+      .select(LIVE_ORDER_COLUMNS)
       .eq("order_number", number)
       .maybeSingle();
     if (orderError) throw orderError;
@@ -5466,8 +5603,8 @@ async function loadSupabaseOrderDetailForReport(record) {
     }
 
     const [{ data: itemRows, error: itemError }, { data: paymentRows, error: paymentError }] = await Promise.all([
-      supabaseClient.from("order_items").select("*").eq("order_id", orderRow.id).order("id", { ascending: true }),
-      supabaseClient.from("payments").select("*").eq("order_id", orderRow.id).order("paid_at", { ascending: false }).limit(1)
+      supabaseClient.from("order_items").select(LIVE_ORDER_ITEM_COLUMNS).eq("order_id", orderRow.id).order("id", { ascending: true }),
+      supabaseClient.from("payments").select(LIVE_ORDER_PAYMENT_COLUMNS).eq("order_id", orderRow.id).order("paid_at", { ascending: false }).limit(1)
     ]);
     if (itemError) throw itemError;
     if (paymentError) throw paymentError;
@@ -5477,7 +5614,7 @@ async function loadSupabaseOrderDetailForReport(record) {
     if (itemIds.length) {
       const { data, error } = await supabaseClient
         .from("order_item_addons")
-        .select("*")
+        .select(LIVE_ORDER_ADDON_COLUMNS)
         .in("order_item_id", itemIds);
       if (error) throw error;
       addonRows = data || [];
@@ -5639,7 +5776,7 @@ async function loadSupabaseReportRecords(force = false, range = reportRange()) {
       const to = from + pageSize - 1;
       const { data, error } = await supabaseClient
         .from("report_sales_records")
-        .select("*")
+        .select(REPORT_SALES_RECORD_COLUMNS)
         .gte(reportTimeColumn, range.start.toISOString())
         .lte(reportTimeColumn, range.end.toISOString())
         .order(reportTimeColumn, { ascending: false })
@@ -5961,11 +6098,11 @@ async function loadProfitSummary(level = "years", year = null, month = null, for
   try {
     let query;
     if (level === "months") {
-      query = supabaseClient.from("report_profit_monthly").select("*").eq("year", year).order("month", { ascending: false });
+      query = supabaseClient.from("report_profit_monthly").select(REPORT_PROFIT_MONTH_COLUMNS).eq("year", year).order("month", { ascending: false });
     } else if (level === "days") {
-      query = supabaseClient.from("report_profit_daily").select("*").eq("year", year).eq("month", month).order("day", { ascending: false });
+      query = supabaseClient.from("report_profit_daily").select(REPORT_PROFIT_DAY_COLUMNS).eq("year", year).eq("month", month).order("day", { ascending: false });
     } else {
-      query = supabaseClient.from("report_profit_yearly").select("*").order("year", { ascending: false });
+      query = supabaseClient.from("report_profit_yearly").select(REPORT_PROFIT_YEAR_COLUMNS).order("year", { ascending: false });
     }
     const { data, error } = await query;
     if (error) throw error;
@@ -8410,6 +8547,7 @@ function saveSelfOrderLastOrderSnapshot(order, checkoutTotal, meta) {
   const numericTotal = Number(checkoutTotal);
   const safeTotal = Number.isFinite(numericTotal) ? Math.max(0, numericTotal) : 0;
   sessionStorage.setItem("self_order_last_order", JSON.stringify({
+    id: order?.id || "",
     number: order?.number || "-",
     checkoutTotal: safeTotal,
     total: safeTotal,
@@ -9967,6 +10105,7 @@ function renderSelfOrderPayment() {
 function renderSelfOrderSuccess() {
   const order = selfOrderLastOrderSnapshot();
   const customer = String(order?.customer || "").trim();
+  const hasOrderReference = Boolean(order?.id || order?.number);
   return `
     <main class="self-order-main success">
       <section class="self-order-success-card">
@@ -9981,10 +10120,49 @@ function renderSelfOrderSuccess() {
           <span><b>Nama pelanggan</b><strong>${customer ? escapeHtml(customer) : "-"}</strong></span>
         </div>
         <p>Pesanan tambahan dapat dilakukan dengan scan QR Code ulang atau klik tombol dibawah.</p>
-        <button class="self-order-primary" type="button" onclick="selfOrderShowMenu()">Pesan Lagi</button>
+        <div class="self-order-success-actions">
+          <button class="self-order-primary" type="button" onclick="selfOrderShowMenu()">Pesan Lagi</button>
+          <button class="self-order-secondary" type="button" onclick="openSelfOrderMoveTableDialog()" ${hasOrderReference ? "" : "disabled"}>Pindah Meja</button>
+          <button class="self-order-secondary" type="button" onclick="openSelfOrderHistory()" ${hasOrderReference ? "" : "disabled"}>Riwayat Pesanan</button>
+        </div>
       </section>
     </main>
   `;
+}
+
+function selfOrderLastLiveOrder() {
+  const snapshot = selfOrderLastOrderSnapshot();
+  if (!snapshot) return null;
+  return state.orders.find(order => (
+    (snapshot.id && order.id === snapshot.id)
+    || (snapshot.number && order.number === snapshot.number)
+  )) || null;
+}
+
+function openSelfOrderMoveTableDialog() {
+  const order = selfOrderLastLiveOrder();
+  if (!order) return toast("Pesanan terakhir tidak ditemukan.");
+  return openMoveOrderTableDialog(order.id, "selforder");
+}
+
+function openSelfOrderHistory() {
+  const snapshot = selfOrderLastOrderSnapshot();
+  const order = selfOrderLastLiveOrder();
+  const groups = order ? groupedOrderItems(order) : [];
+  openModal(`
+    <div class="section-title">
+      <div><h3>Riwayat Pesanan</h3><p>${escapeHtml(displayOrderNumber(snapshot?.number || order?.number || "-"))}</p></div>
+      <button class="modal-close-x" type="button" onclick="closeModal()" aria-label="Tutup">&times;</button>
+    </div>
+    <div class="self-order-history-modal">
+      <div class="self-order-open-table-meta">
+        <span>Meja: <b>${escapeHtml(snapshot?.table || order?.serviceInfo || "A-1")}</b></span>
+        <span>Nama: <b>${escapeHtml(snapshot?.customer || order?.customer || "-")}</b></span>
+        <span>Total: <b>${money(snapshot?.checkoutTotal ?? orderTotal(order || {}))}</b></span>
+      </div>
+      ${groups.length ? renderSelfOrderOpenTableHistory(order) : `<p class="self-order-open-table-empty">Detail item belum tersedia di perangkat ini.</p>`}
+    </div>
+  `, { skipHistory: true });
 }
 
 function renderSelfOrderFloatingCart() {
