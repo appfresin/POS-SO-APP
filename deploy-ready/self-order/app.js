@@ -32,6 +32,7 @@ const LIVE_ORDER_ITEM_COLUMNS = "id,order_id,product_name,sku,qty,price,cost,dis
 const LIVE_ORDER_ADDON_COLUMNS = "order_item_id,addon_id,addon_name,qty,price,cost";
 const LIVE_ORDER_PAYMENT_COLUMNS = "order_id,method,received_amount,change_amount,payment_breakdown,paid_at";
 const REPORT_SALES_RECORD_COLUMNS = "id,number,created_at,paid_at,source,imported,order_type,customer_name,payment_method,payment_breakdown,payment_status,order_status,subtotal,discount,total,profit";
+const REPORT_ORDER_SUMMARY_COLUMNS = "created_at,paid_at,order_type,payment_status,order_status";
 const REPORT_PROFIT_YEAR_COLUMNS = "year,transaction_count,total,revenue,profit,estimated_cost";
 const REPORT_PROFIT_MONTH_COLUMNS = "year,month,transaction_count,total,revenue,profit,estimated_cost";
 const REPORT_PROFIT_DAY_COLUMNS = "year,month,day,sales_date,date,transaction_count,total,revenue,profit,estimated_cost";
@@ -208,6 +209,8 @@ let profitSummaryCache = { years: [], months: {}, days: {} };
 let profitSummaryLoading = false;
 let profitSummaryLoadingKeys = new Set();
 let profitSummaryLoadedAt = new Map();
+let reportOrderSummaryCache = new Map();
+let reportOrderSummaryLoadingKeys = new Set();
 let legacyProfitSummaryLoading = false;
 let legacyProfitSummaryLoadedAt = new Map();
 let dataRefreshLoading = false;
@@ -3014,6 +3017,8 @@ function invalidateReportCaches() {
   profitSummaryLoadingKeys = new Set();
   profitSummaryLoading = false;
   profitSummaryLoadedAt = new Map();
+  reportOrderSummaryCache = new Map();
+  reportOrderSummaryLoadingKeys = new Set();
   legacyProfitSummaryLoadedAt = new Map();
   legacyCashierDataLoadedAt = 0;
   legacyCashierDataLoadKey = "";
@@ -5988,6 +5993,97 @@ function normalizeProfitSummaryRow(row) {
     profit: Number(row.profit || 0),
     estimatedCost: Number(row.estimated_cost ?? Math.max(0, Number(total || 0) - Number(row.profit || 0)))
   };
+}
+
+function reportOrderSummaryKey(range) {
+  if (!range) return "";
+  return [new Date(range.start || 0).toISOString(), new Date(range.end || 0).toISOString()].join("|");
+}
+
+function normalizeReportOrderType(value) {
+  const text = String(value || "").trim();
+  const lower = text.toLowerCase().replace(/[_-]+/g, " ");
+  if (lower.includes("take") && lower.includes("away")) return "Take Away";
+  if (lower.includes("delivery")) return "Delivery";
+  if (lower.includes("dine")) return "Dine In";
+  return text || "Dine In";
+}
+
+function normalizeReportOrderSummaryRow(row) {
+  return {
+    orderType: normalizeReportOrderType(row?.order_type),
+    paymentStatus: row?.payment_status || "",
+    orderStatus: row?.order_status || "",
+    paidAt: row?.paid_at || "",
+    createdAt: row?.created_at || ""
+  };
+}
+
+function reportOrderSummary(range) {
+  const key = reportOrderSummaryKey(range);
+  const cached = key ? reportOrderSummaryCache.get(key) : null;
+  const rows = cached?.rows || [];
+  const byType = rows.reduce((map, row) => {
+    map[row.orderType] = Number(map[row.orderType] || 0) + 1;
+    return map;
+  }, {});
+  return {
+    loaded: Boolean(cached),
+    rows,
+    totalDone: rows.length,
+    byType
+  };
+}
+
+function requestReportOrderSummary(range) {
+  if (!supabaseReadable() || !range) return;
+  loadReportOrderSummary(range, false).then(() => {
+    if (["dashboard", "orders"].includes(view) && !isBlockingInteractionActive()) render();
+  });
+}
+
+async function loadReportOrderSummary(range, force = false) {
+  if (!supabaseReadable() || supabaseReportRecordsUnavailable || !range) return;
+  const cacheKey = reportOrderSummaryKey(range);
+  if (!cacheKey || reportOrderSummaryLoadingKeys.has(cacheKey)) return;
+  const cached = reportOrderSummaryCache.get(cacheKey);
+  if (!force && cached && Date.now() - Number(cached.loadedAt || 0) < 60000) return;
+  reportOrderSummaryLoadingKeys.add(cacheKey);
+  try {
+    const rows = [];
+    const pageSize = 1000;
+    let timeColumn = "paid_at";
+    for (let from = 0; ; from += pageSize) {
+      const to = from + pageSize - 1;
+      const { data, error } = await supabaseClient
+        .from("report_sales_records")
+        .select(REPORT_ORDER_SUMMARY_COLUMNS)
+        .gte(timeColumn, range.start.toISOString())
+        .lte(timeColumn, range.end.toISOString())
+        .order(timeColumn, { ascending: false })
+        .range(from, to);
+      if (error && timeColumn === "paid_at" && isSupabaseReportPaidAtColumnIssue(error)) {
+        rows.length = 0;
+        timeColumn = "created_at";
+        from = -pageSize;
+        continue;
+      }
+      if (error) throw error;
+      rows.push(...(data || []).map(normalizeReportOrderSummaryRow));
+      if (!data || data.length < pageSize) break;
+    }
+    reportOrderSummaryCache.set(cacheKey, { rows, loadedAt: Date.now() });
+  } catch (error) {
+    if (isSupabaseReportViewIssue(error, "report_sales_records")) {
+      supabaseReportRecordsUnavailable = true;
+      console.warn("Report order summary skipped: view report_sales_records belum tersedia.");
+    } else {
+      console.error("Report order summary load failed", error);
+    }
+    reportOrderSummaryCache.set(cacheKey, { rows: [], loadedAt: Date.now(), error: error.message || String(error) });
+  } finally {
+    reportOrderSummaryLoadingKeys.delete(cacheKey);
+  }
 }
 
 function legacyProfitSummaryCacheKey(level, year = null, month = null) {
@@ -12188,6 +12284,7 @@ function chooseOrdersCalendarDate(key) {
 
 function renderOrders() {
   const dateRange = ordersDateRange();
+  requestReportOrderSummary(dateRange);
   const quickFilter = sessionStorage.getItem("orders_quick_filter") || "Semua";
   const query = sessionStorage.getItem("orders_query") || "";
   const quickFilters = [
@@ -12202,6 +12299,8 @@ function renderOrders() {
   const processOrders = periodOrders.filter(order => order.status === "Sedang Disiapkan");
   const doneOrders = periodOrders.filter(order => order.status === "Selesai");
   const unpaid = periodOrders.filter(order => order.paymentStatus !== "Lunas" && order.status !== "Dibatalkan");
+  const orderSummary = reportOrderSummary(dateRange);
+  const doneCount = orderSummary.loaded ? orderSummary.totalDone : doneOrders.length;
   const filtered = periodOrders.filter(order => orderMatchesQuickFilter(order, quickFilter));
   const ordered = filtered.slice().sort(ordersEntryStableSort);
   const visibleOrders = ordered.filter(order => orderMatchesSearch(order, query));
@@ -12211,7 +12310,7 @@ function renderOrders() {
     ["Baru", newOrders.length, "Pesanan", "Pesanan Baru", "new"],
     ["Diproses", processOrders.length, "Pesanan", "Sedang Disiapkan", "process"],
     ["Belum Lunas", unpaid.length, "Pesanan", "Belum Lunas", "unpaid"],
-    ["Selesai", doneOrders.length, "Pesanan", "Selesai", "done"]
+    ["Selesai", doneCount, "Pesanan", "Selesai", "done"]
   ];
   return `
     <section class="orders-page">
