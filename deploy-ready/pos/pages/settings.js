@@ -50,7 +50,7 @@ function renderNotificationSettingsTab() {
       <div class="section-title">
         <div><h3>Notifikasi</h3><p>Atur peringatan native APK untuk pesanan baru kasir dan dapur.</p></div>
       </div>
-      <form class="notification-settings-form" onsubmit="saveNotificationSettings(event)">
+      <form class="notification-settings-form" onchange="handleNotificationSettingsDraftChange(this)" onsubmit="saveNotificationSettings(event)">
         <div class="notification-status-card">
           <strong>Pesanan Baru</strong>
           <span>Suara, getar, dan tampilan lock screen mengikuti channel Android aplikasi.</span>

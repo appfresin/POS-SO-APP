@@ -2415,17 +2415,41 @@ async function registerNativePushToken(options = {}) {
 
 async function nativePushTokenIsRegistered(token) {
   if (!token || !canAttemptSupabaseSync()) return false;
+  const target = nativePushTarget();
+  const scopeKey = nativePushScopeKey();
+  const enabled = nativePushEnabledForTarget(target);
+  const expectedCategories = target === "dapur" ? normalizeKitchenNotificationCategories(deviceKitchenNotificationCategories()) : [];
   try {
-    const rows = await supabaseRestSelect("device_push_tokens", "id", {
+    const rows = await supabaseRestSelect("device_push_tokens", "id,target,scope_key,is_active,kitchen_categories", {
       fcm_token: `eq.${token}`,
-      is_active: "eq.true",
+      target: `eq.${target}`,
+      scope_key: `eq.${scopeKey}`,
       limit: "1"
     });
-    return Array.isArray(rows) && rows.length > 0;
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row || Boolean(row.is_active) !== enabled) return false;
+    if (target !== "dapur") return true;
+    const actualCategories = normalizeKitchenNotificationCategories(row.kitchen_categories);
+    if (actualCategories.length !== expectedCategories.length) return false;
+    const actualKeys = new Set(actualCategories.map(category => category.toLowerCase()));
+    return expectedCategories.every(category => actualKeys.has(category.toLowerCase()));
   } catch (error) {
     console.warn("Native push token verification failed", error);
     return false;
   }
+}
+
+function updateNativePushTokenButtonState(scope = document) {
+  const button = scope?.querySelector?.(".notification-token-button");
+  if (!button) return;
+  const registered = nativePushTokenRegistrationLooksRegistered();
+  button.classList.toggle("is-registered", registered);
+  button.innerHTML = registered ? "✓ Terdaftar" : "Daftar token";
+}
+
+function handleNotificationSettingsDraftChange(form) {
+  applyNotificationSettings(readNotificationSettingsFromForm(form));
+  updateNativePushTokenButtonState(form);
 }
 
 async function registerDevicePushTokenFromSettings(button) {
