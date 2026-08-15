@@ -10471,7 +10471,7 @@ function renderSelfOrderSuccess() {
           <span><b>Status bayar</b><strong>Bayar di Kasir saat pulang</strong></span>
           <span><b>Nama pelanggan</b><strong>${customer ? escapeHtml(customer) : "-"}</strong></span>
         </div>
-        <p>Pesanan Anda telah kami terima dan akan segera diproses ±20 menit. Untuk pesanan tambahan, silakan scan ulang QR Code atau klik tombol di bawah. Terima kasih!</p>
+        <p>Pesanan akan diproses ±20 menit. Untuk tambah pesanan, scan ulang QR Code atau klik tombol di bawah. Terima kasih!</p>
         <div class="self-order-success-actions">
           <button class="self-order-primary" type="button" onclick="selfOrderShowMenu()">Pesan Lagi</button>
           ${moveInline ? renderSelfOrderSuccessMoveInline(currentTable) : ""}
