@@ -1634,6 +1634,12 @@ function dateTime(value) {
   return new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
+function timeOnly(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }).replace(".", ":");
+}
+
 function todayKey(date = new Date()) {
   const localDate = date instanceof Date ? date : new Date(date);
   const year = localDate.getFullYear();
@@ -8641,10 +8647,8 @@ function renderSelfOrderOpenTableDecision(order, table, choice) {
   return `
     <section class="self-order-open-table-card" aria-live="polite">
       <div class="self-order-open-table-head">
-        <div>
-          <span>Meja ini masih punya pesanan aktif</span>
-        </div>
-        <em>${money(orderTotal(order))}</em>
+        <span class="self-order-open-table-icon" aria-hidden="true"><i></i></span>
+        <strong>Apakah ini pesanan anda sebelumnya ?</strong>
       </div>
       <div class="self-order-open-table-meta">
         <span>Meja: <b>${escapeHtml(table || "A-1")}</b></span>
@@ -8654,7 +8658,6 @@ function renderSelfOrderOpenTableDecision(order, table, choice) {
       <div class="self-order-open-table-history">
         ${renderSelfOrderOpenTableHistory(order)}
       </div>
-      <p class="self-order-open-table-help">Apakah itu pesanan anda sebelumnya?</p>
       <div class="self-order-open-table-actions">
         <button class="${choice === "append" ? "active" : ""}" type="button" onclick="selfOrderChooseOpenTableOrder('append')">Ya</button>
         <button class="${choice === "new" ? "active" : ""}" type="button" onclick="selfOrderChooseOpenTableOrder('new')">Tidak</button>
@@ -8839,6 +8842,7 @@ function saveSelfOrderLastOrderSnapshot(order, checkoutTotal, meta) {
   sessionStorage.setItem("self_order_last_order", JSON.stringify({
     id: order?.id || "",
     number: order?.number || "-",
+    createdAt: order?.createdAt || meta.createdAt || "",
     checkoutTotal: safeTotal,
     total: safeTotal,
     orderTotal: orderTotal(order),
@@ -8860,7 +8864,8 @@ function selfOrderLastOrderSnapshot() {
       ...snapshot,
       checkoutTotal: Number.isFinite(checkoutTotal) ? Math.max(0, checkoutTotal) : 0,
       table: String(snapshot.table || "A-1").trim() || "A-1",
-      customer: String(snapshot.customer || "").trim()
+      customer: String(snapshot.customer || "").trim(),
+      createdAt: String(snapshot.createdAt || "").trim()
     };
   } catch {
     return null;
@@ -8889,6 +8894,11 @@ function activeOrderAtTable(table, exceptOrderId = "") {
 }
 
 function closeMoveOrderTableDialog(context = "orders") {
+  if (context === "selforder") {
+    sessionStorage.removeItem("self_order_move_table_inline");
+    render();
+    return;
+  }
   closeModal({ skipHistory: true });
   if (context === "unpaid") {
     openHeldOrders();
@@ -8904,16 +8914,18 @@ function moveOrderTableDialogHtml(order, context = "orders") {
       <button class="modal-close-x" type="button" onclick='closeMoveOrderTableDialog(${JSON.stringify(context)})' aria-label="Tutup">&times;</button>
     </div>
     <div class="move-table-card">
-      <label>
-        <span>Meja saat ini</span>
-        <strong>${escapeHtml(currentTable || "-")}</strong>
-      </label>
-      <label>
-        <span>Meja baru</span>
-        <input id="moveOrderTableInput" class="input" value="${escapeHtml(currentTable)}" placeholder="Contoh: A-2" autocomplete="off" />
-      </label>
-      <small>Masukkan kode meja baru. Jika meja baru masih punya pesanan aktif, pemindahan akan ditahan.</small>
-      <div class="toolbar">
+      <div class="move-table-compact-grid">
+        <label class="move-table-field">
+          <span>Meja lama</span>
+          <strong>${escapeHtml(currentTable || "-")}</strong>
+        </label>
+        <label class="move-table-field">
+          <span>Meja baru</span>
+          <input id="moveOrderTableInput" class="input" value="${escapeHtml(currentTable)}" placeholder="Contoh: A-2" autocomplete="off" />
+        </label>
+      </div>
+      <p class="move-table-note">Meja tujuan kosong agar pesanan tidak bercampur.</p>
+      <div class="toolbar move-table-actions">
         <button class="btn" type="button" onclick='closeMoveOrderTableDialog(${JSON.stringify(context)})'>Batal</button>
         <button class="btn green" type="button" onclick='confirmMoveOrderTable(${JSON.stringify(order?.id || "")}, ${JSON.stringify(context)})'>Pindahkan</button>
       </div>
@@ -8926,7 +8938,12 @@ function openMoveOrderTableDialog(orderId, context = "orders") {
   if (!order) return toast("Pesanan tidak ditemukan.");
   if (!canMoveOrderTable(order)) return toast("Pesanan ini tidak bisa dipindahkan meja.");
   openModal(moveOrderTableDialogHtml(order, context), { skipHistory: true });
-  setTimeout(() => document.getElementById("moveOrderTableInput")?.focus({ preventScroll: true }), 0);
+  setTimeout(() => {
+    const input = document.getElementById("moveOrderTableInput");
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(input.value.length, input.value.length);
+  }, 0);
 }
 
 async function confirmMoveOrderTable(orderId, context = "orders") {
@@ -9315,6 +9332,7 @@ async function selfOrderShowMenu() {
   sessionStorage.setItem("self_order_step", "menu");
   sessionStorage.removeItem("self_order_product_id");
   sessionStorage.removeItem("self_order_item_note");
+  sessionStorage.removeItem("self_order_move_table_inline");
   pushSelfOrderHistory("menu");
   render();
   if (canAttemptSupabaseSync()) await ensureLimitedStockCartReservations(selfOrderCart, "Self Order");
@@ -9334,6 +9352,7 @@ function selfOrderOpenProduct(productId) {
 
 async function selfOrderShowCart() {
   sessionStorage.setItem("self_order_step", "cart");
+  sessionStorage.removeItem("self_order_move_table_inline");
   pushSelfOrderHistory("cart");
   render();
   if (canAttemptSupabaseSync()) await ensureLimitedStockCartReservations(selfOrderCart, "Self Order");
@@ -9341,6 +9360,7 @@ async function selfOrderShowCart() {
 
 async function selfOrderShowPayment() {
   if (!selfOrderCart.length) return toast("Keranjang masih kosong.");
+  sessionStorage.removeItem("self_order_move_table_inline");
   const stockReady = await ensureLimitedStockCartReservations(selfOrderCart, "Self Order");
   if (!stockReady.ok) {
     return toast(limitedStockFailureMessage(stockReady.product, stockReady.variantKey, stockReady));
@@ -10349,9 +10369,6 @@ function renderSelfOrderTableDecision() {
   if (!openOrder) return renderSelfOrderPayment();
   return `
     <main class="self-order-main payment">
-      <div class="self-order-section-head">
-        <div><span>Pembayaran</span><h3>Total ${money(selfOrderSubtotal())}</h3></div>
-      </div>
       ${renderSelfOrderOpenTableDecision(openOrder, table || "A-1", selfOrderOpenTableChoice(table || "A-1", openOrder))}
     </main>
   `;
@@ -10396,15 +10413,23 @@ function renderSelfOrderSuccess() {
   const order = selfOrderLastOrderSnapshot();
   const customer = String(order?.customer || "").trim();
   const hasOrderReference = Boolean(order?.id || order?.number);
+  const liveOrder = selfOrderLastLiveOrder();
+  const canMove = Boolean(liveOrder && canMoveOrderTable(liveOrder));
+  const moveInline = selfOrderMoveTableInlineVisible() && canMove;
+  const currentTable = liveOrder?.serviceInfo || order?.table || "A-1";
+  const orderCreatedAt = liveOrder?.createdAt || order?.createdAt || "";
   return `
     <main class="self-order-main success">
       <section class="self-order-success-card">
         <div class="self-order-success-mark" aria-hidden="true">✓</div>
         <h2>Pesanan diterima</h2>
+        <p class="self-order-success-warning">Mohon Tidak Pindah Meja</p>
+        <p class="self-order-success-warning-hint">(klik tombol dibawah jika pindah meja)</p>
         <p>Pesanan anda telah kami terima dan akan segera di proses +-20 menit, Terimakasih.</p>
         <div class="self-order-success-detail">
           <span><b>Nomor meja</b><strong>${escapeHtml(order?.table || "A-1")}</strong></span>
           <span><b>Nomor order</b><strong>${escapeHtml(displayOrderNumber(order?.number || "-"))}</strong></span>
+          <span><b>Waktu order</b><strong>${escapeHtml(orderCreatedAt ? timeOnly(orderCreatedAt) : "-")}</strong></span>
           <span><b>Nominal</b><strong>${money(order?.checkoutTotal ?? order?.total ?? 0)}</strong></span>
           <span><b>Status bayar</b><strong>Bayar di Kasir saat pulang</strong></span>
           <span><b>Nama pelanggan</b><strong>${customer ? escapeHtml(customer) : "-"}</strong></span>
@@ -10412,11 +10437,27 @@ function renderSelfOrderSuccess() {
         <p>Pesanan tambahan dapat dilakukan dengan scan QR Code ulang atau klik tombol dibawah.</p>
         <div class="self-order-success-actions">
           <button class="self-order-primary" type="button" onclick="selfOrderShowMenu()">Pesan Lagi</button>
-          <button class="self-order-secondary" type="button" onclick="openSelfOrderMoveTableDialog()" ${hasOrderReference ? "" : "disabled"}>Pindah Meja</button>
-          <button class="self-order-secondary" type="button" onclick="openSelfOrderHistory()" ${hasOrderReference ? "" : "disabled"}>Riwayat Pesanan</button>
+          ${moveInline ? renderSelfOrderSuccessMoveInline(currentTable) : ""}
+          <button class="self-order-secondary" type="button" onclick="${moveInline && liveOrder ? `confirmMoveOrderTable('${liveOrder.id}', 'selforder')` : "openSelfOrderMoveTableDialog()"}" ${hasOrderReference ? "" : "disabled"}>${moveInline ? "Konfirmasi Pindah Meja" : "Pindah Meja"}</button>
         </div>
       </section>
     </main>
+  `;
+}
+
+function selfOrderMoveTableInlineVisible() {
+  return sessionStorage.getItem("self_order_move_table_inline") === "1";
+}
+
+function renderSelfOrderSuccessMoveInline(currentTable) {
+  const table = String(currentTable || "A-1").trim() || "A-1";
+  return `
+    <div class="self-order-success-move-inline" aria-live="polite">
+      <div class="self-order-success-move-grid">
+        <label><span>Meja lama</span><input class="input" value="${escapeHtml(table)}" readonly aria-readonly="true" /></label>
+        <label><span>Meja baru</span><input id="moveOrderTableInput" class="input" value="${escapeHtml(table)}" placeholder="A-2" autocomplete="off" /></label>
+      </div>
+    </div>
   `;
 }
 
@@ -10432,7 +10473,15 @@ function selfOrderLastLiveOrder() {
 function openSelfOrderMoveTableDialog() {
   const order = selfOrderLastLiveOrder();
   if (!order) return toast("Pesanan terakhir tidak ditemukan.");
-  return openMoveOrderTableDialog(order.id, "selforder");
+  if (!canMoveOrderTable(order)) return toast("Pesanan ini tidak bisa dipindahkan meja.");
+  sessionStorage.setItem("self_order_move_table_inline", "1");
+  render();
+  setTimeout(() => {
+    const input = document.getElementById("moveOrderTableInput");
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(input.value.length, input.value.length);
+  }, 0);
 }
 
 function openSelfOrderHistory() {
@@ -11497,9 +11546,24 @@ async function submitOrder() {
   if (!paymentPayload) return;
   const printReceipt = sessionStorage.getItem("pos_print_receipt") !== "0";
   if (existingOrder) {
+    const nextItems = cart.map(item => ({ ...item }));
+    const orderBatch = Math.max(1, ...((existingOrder.items || []).map(orderItemBatch))) + 1;
+    const updateCreatedAt = new Date().toISOString();
+    const submittedOrderNote = String(document.getElementById("orderNote")?.value || "").trim();
+    const additionalItems = prepareAdditionalOrderItems(existingOrder.items || [], nextItems, orderBatch, submittedOrderNote, updateCreatedAt);
+    let stockCommit = { accepted: true, token: "" };
+    if (additionalItems.length) {
+      const stockValidation = validateLimitedStockItems(additionalItems);
+      if (!stockValidation.ok) return toast(limitedStockMessage(stockValidation.product, stockValidation.variantKey, stockValidation.available));
+      stockCommit = await commitLimitedStockReservations(additionalItems, existingOrder.number, "POS");
+      if (!stockCommit.accepted) {
+        return toast(limitedStockFailureMessage(stockCommit.product || stockValidation.product, stockCommit.variantKey || "", stockCommit));
+      }
+    }
     existingOrder.customer = customerDisplayName(document.getElementById("customerName")?.value);
     existingOrder.serviceInfo = document.getElementById("serviceInfo")?.value || existingOrder.serviceInfo || "-";
-    existingOrder.note = document.getElementById("orderNote")?.value || existingOrder.note || "";
+    existingOrder.note = additionalItems.length ? (existingOrder.note || "") : submittedOrderNote;
+    existingOrder.items = additionalItems.length ? [...(existingOrder.items || []), ...additionalItems] : nextItems;
     existingOrder.paymentStatus = "Lunas";
     existingOrder.paymentMethod = paymentMethod;
     existingOrder.receivedAmount = paymentPayload.receivedAmount;
@@ -11510,16 +11574,45 @@ async function submitOrder() {
     existingOrder.discount = discount;
     existingOrder.tax = tax;
     existingOrder.grandTotal = grandTotal;
-    existingOrder.paidAt = new Date().toISOString();
+    existingOrder.updatedAt = updateCreatedAt;
+    existingOrder.paidAt = updateCreatedAt;
+    if (additionalItems.length) {
+      existingOrder.status = "Pesanan Baru";
+      existingOrder.confirmedAt = null;
+      existingOrder.preparedAt = null;
+      existingOrder.readyAt = null;
+      existingOrder.completedAt = null;
+      existingOrder.pendingPushEventType = "additional_order";
+    }
+    if (stockCommit.token) existingOrder.limitedStockCommitToken = stockCommit.token;
+    const touchedProductIds = applyLimitedStockItems(additionalItems, -1, `Tambahan bayar ${existingOrder.number}`);
+    for (const item of additionalItems) {
+      for (const addon of item.addons || []) {
+        const addonProduct = state.products.find(product => product.id === addon.id);
+        if (addonProduct?.trackStock) {
+          addonProduct.stock = Math.max(0, addonProduct.stock - addon.qty);
+          touchedProductIds.push(addonProduct.id);
+          state.stockMovements.unshift({ id: uid(), at: updateCreatedAt, productId: addonProduct.id, productName: addonProduct.name, qty: -addon.qty, reason: `Add-on tambahan bayar ${existingOrder.number}` });
+        }
+      }
+    }
     cart = [];
     clearPosDraft();
     sessionStorage.setItem("pos_mobile_view", "items");
-    setLastResult("Pembayaran berhasil", "Pesanan belum bayar sudah dilunasi. Struk kasir siap dicetak.", existingOrder);
+    setLastResult("Pembayaran berhasil", additionalItems.length ? "Pesanan tambahan dikirim ke dapur. Struk kasir siap dicetak." : "Pesanan belum bayar sudah dilunasi. Struk kasir siap dicetak.", existingOrder);
     audit("Pesanan belum bayar dilunasi", `${existingOrder.number} ${money(orderTotal(existingOrder))}`);
     saveState();
+    const committedProductIds = new Set([...limitedStockItemTotals(additionalItems).values()].map(entry => entry.product.id));
+    syncProductsByIds(touchedProductIds.filter(productId => !committedProductIds.has(productId)));
+    if (additionalItems.length) {
+      rotateLimitedStockReservationToken("POS");
+      broadcastRealtimeEvent("products");
+    }
     toastOrderSyncOutcome(
       existingOrder,
-      printReceipt ? `Struk dicetak. Kembalian ${money(existingOrder.changeAmount)}.` : `Pembayaran berhasil. Kembalian ${money(existingOrder.changeAmount)}.`
+      additionalItems.length
+        ? "Pesanan tambahan dikirim ke dapur dan pembayaran berhasil."
+        : (printReceipt ? `Struk dicetak. Kembalian ${money(existingOrder.changeAmount)}.` : `Pembayaran berhasil. Kembalian ${money(existingOrder.changeAmount)}.`)
     );
     broadcastRealtimeEvent("orders");
     render();
