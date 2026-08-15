@@ -23,9 +23,10 @@ const OPERATIONAL_CLEANUP_RETENTION_DAYS = 31;
 const OPERATIONAL_CLEANUP_MIN_INTERVAL_HOURS = 20;
 const STALE_REMOTE_ORDER_GRACE_MS = 15 * 60 * 1000;
 const POS_PRODUCT_IMAGE_SIZE = 960;
-const EGRESS_SAVER_POLL_INTERVAL_MS = 60000;
+const EGRESS_SAVER_POLL_INTERVAL_MS = 15000;
 const EGRESS_SAVER_REALTIME_HEALTHY_MS = 2 * 60000;
-const EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS = 3 * 60000;
+const EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS = 2 * 60000;
+const EGRESS_SAVER_ORDER_UNHEALTHY_FALLBACK_MS = 25000;
 const EGRESS_SAVER_MASTER_FALLBACK_MS = 30 * 60000;
 const EGRESS_SAVER_ORDER_LIMIT = 120;
 const EGRESS_SAVER_ORDER_LOOKBACK_HOURS = 30;
@@ -239,9 +240,13 @@ const realtimePendingOrderIds = new Set();
 const realtimePendingOrderItemIds = new Set();
 let deletedOrderSweepLoadedAt = 0;
 let pendingNativePushOrderRefresh = null;
+let pendingLiveOrderRefreshAfterLocalDbReady = null;
 let supabaseRealtimeLastHealthyAt = 0;
+const supabaseRealtimeReasonHealth = {};
 let realtimeFallbackLastOrderAt = 0;
 let realtimeFallbackLastMasterAt = 0;
+const ORDER_LIVE_REFRESH_VIEWS = new Set(["dashboard", "pos", "kitchen", "orders", "reports"]);
+const ORDER_NAVIGATION_REFRESH_STALE_MS = 8000;
 const ORDER_NOTIFICATION_VIEWS = new Set(["kitchen", "orders"]);
 const ORDER_NOTIFICATION_DEDUPE_MS = 12000;
 const ORDER_NOTIFICATION_TONES = {
@@ -271,6 +276,7 @@ let orderNotificationAudioContext = null;
 let orderNotificationPermissionRequested = localStorage.getItem("omnipos_order_notification_permission_requested") === "1";
 const DEVICE_ORDER_NOTIFICATIONS_ENABLED_KEY = "kasirin_device_order_notifications_enabled";
 const DEVICE_KITCHEN_NOTIFICATION_CATEGORIES_KEY = "kasirin_device_kitchen_notification_categories";
+const NATIVE_PUSH_TOKEN_REGISTERED_KEY = "kasirin_native_push_token_registered_signature";
 let storeSettingsLoading = false;
 let storeSettingsLoadedAt = 0;
 let storeSettingsJsonUnavailable = false;
@@ -451,7 +457,7 @@ window.addEventListener("online", () => {
   loadStoreSettingsFromSupabase({ reason: "online", force: true });
   loadMasterDataFromSupabase({ reason: "online" });
   refreshLimitedStockReservations({ reason: "online", reconcile: true });
-  if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "online", force: true });
+  requestLiveOrderRefresh({ reason: "online", force: true, silent: true });
   scheduleAutomaticOperationalCleanup("online");
   scheduleNativePushTokenRegistration("online", { force: true });
 });
@@ -463,7 +469,7 @@ window.addEventListener("offline", () => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
   scheduleNativePushTokenRegistration("visible", { force: true });
-  if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "visibility", force: true, silent: true });
+  requestLiveOrderRefresh({ reason: "visibility", force: true, silent: true });
 });
 
 setInterval(() => {
@@ -631,12 +637,14 @@ async function initializePersistentState() {
       processSyncQueue("indexeddb-loaded");
       loadStoreSettingsFromSupabase({ reason: "indexeddb-loaded" });
       loadMasterDataFromSupabase({ reason: "indexeddb-loaded" });
+      refreshLiveOrdersAfterLocalDbReady("indexeddb-loaded");
       return;
     }
     saveStateToIndexedDb(persistedStateSnapshot(state));
     processSyncQueue("indexeddb-migrated");
     loadStoreSettingsFromSupabase({ reason: "indexeddb-migrated" });
     loadMasterDataFromSupabase({ reason: "indexeddb-migrated" });
+    refreshLiveOrdersAfterLocalDbReady("indexeddb-migrated");
   } catch (error) {
     localDbReady = true;
     localDbStatus = "IndexedDB gagal, memakai fallback ringkas";
@@ -644,6 +652,7 @@ async function initializePersistentState() {
     render();
     loadStoreSettingsFromSupabase({ reason: "indexeddb-failed" });
     loadMasterDataFromSupabase({ reason: "indexeddb-failed", silent: view === "selforder" });
+    refreshLiveOrdersAfterLocalDbReady("indexeddb-failed");
   }
 }
 
@@ -1750,7 +1759,7 @@ function initSupabase() {
     loadStoreSettingsFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
     loadMasterDataFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
     refreshLimitedStockReservations({ reason: "supabase-ready" });
-    if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
+    requestLiveOrderRefresh({ reason: "supabase-ready", silent: true });
     scheduleAutomaticOperationalCleanup("supabase-ready");
     scheduleNativePushTokenRegistration("supabase-ready", { force: true });
     if (view === "reports") requestActiveReportData();
@@ -1763,7 +1772,7 @@ function initSupabase() {
     loadStoreSettingsFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
     loadMasterDataFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
     refreshLimitedStockReservations({ reason: "auth-change" });
-    if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
+    requestLiveOrderRefresh({ reason: "auth-change", force: true, silent: true });
     scheduleAutomaticOperationalCleanup("auth-change");
     scheduleNativePushTokenRegistration("auth-change", { force: true });
     if (view === "reports") requestActiveReportData(true);
@@ -1799,16 +1808,73 @@ function setupSupabaseRealtime() {
     });
     return channel.subscribe(status => {
       if (status === "SUBSCRIBED") markSupabaseRealtimeHealthy(reason);
+      if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status)) markSupabaseRealtimeUnhealthy(reason, status);
     });
   });
 }
 
 function markSupabaseRealtimeHealthy(reason = "") {
   supabaseRealtimeLastHealthyAt = Date.now();
+  if (reason) {
+    supabaseRealtimeReasonHealth[reason] = {
+      status: "healthy",
+      lastHealthyAt: supabaseRealtimeLastHealthyAt,
+      lastUnhealthyAt: supabaseRealtimeReasonHealth[reason]?.lastUnhealthyAt || 0,
+      lastStatus: "SUBSCRIBED"
+    };
+  }
 }
 
 function supabaseRealtimeRecentlyHealthy(now = Date.now()) {
   return supabaseRealtimeLastHealthyAt > 0 && now - supabaseRealtimeLastHealthyAt < EGRESS_SAVER_REALTIME_HEALTHY_MS;
+}
+
+function markSupabaseRealtimeUnhealthy(reason = "", status = "UNKNOWN") {
+  if (!reason) return;
+  supabaseRealtimeReasonHealth[reason] = {
+    status: "unhealthy",
+    lastHealthyAt: supabaseRealtimeReasonHealth[reason]?.lastHealthyAt || 0,
+    lastUnhealthyAt: Date.now(),
+    lastStatus: status
+  };
+  if (reason === "orders") {
+    requestLiveOrderRefresh({ reason: "realtime-unhealthy", force: true, silent: true });
+  }
+}
+
+function supabaseRealtimeReasonHealthy(reason = "", now = Date.now()) {
+  const health = supabaseRealtimeReasonHealth[reason];
+  if (!health) return supabaseRealtimeRecentlyHealthy(now);
+  if (health.status === "unhealthy") return false;
+  return Number(health.lastHealthyAt || 0) > 0 && now - Number(health.lastHealthyAt || 0) < EGRESS_SAVER_REALTIME_HEALTHY_MS;
+}
+
+function requestLiveOrderRefresh(options = {}) {
+  if (IS_SELF_ORDER_APP || !supabaseReadable()) return;
+  const refreshOptions = {
+    reason: options.reason || "orders-refresh",
+    force: options.force === true,
+    silent: options.silent !== false,
+    orderIds: options.orderIds
+  };
+  if (!localDbReady) {
+    pendingLiveOrderRefreshAfterLocalDbReady = refreshOptions;
+    return;
+  }
+  return loadRecentOrdersFromSupabase(refreshOptions);
+}
+
+function refreshLiveOrdersAfterLocalDbReady(reason = "localdb-ready") {
+  if (IS_SELF_ORDER_APP || !supabaseReadable()) return;
+  const pending = pendingLiveOrderRefreshAfterLocalDbReady;
+  pendingLiveOrderRefreshAfterLocalDbReady = null;
+  requestLiveOrderRefresh(pending || { reason, force: true, silent: true });
+}
+
+function refreshLiveOrdersForCurrentView(reason = "navigation") {
+  if (IS_SELF_ORDER_APP || !ORDER_LIVE_REFRESH_VIEWS.has(view)) return;
+  const stale = !realtimeOrdersLoadedAt || Date.now() - realtimeOrdersLoadedAt > ORDER_NAVIGATION_REFRESH_STALE_MS;
+  if (stale) requestLiveOrderRefresh({ reason, force: true, silent: true });
 }
 
 function queueRealtimeOrderDelta(table, payload = {}) {
@@ -1896,16 +1962,15 @@ async function pollRealtimeFallback() {
   if (IS_SELF_ORDER_APP) return;
   if (!supabaseReadable() || !localDbReady || navigator.onLine === false) return;
   const now = Date.now();
-  const orderViews = new Set(["dashboard", "pos", "kitchen", "orders", "reports"]);
   const masterViews = new Set(["dashboard", "pos", "kitchen", "orders", "products", "stock", "stock-opname", "selforder", "settings"]);
-  if (orderViews.has(view)) {
-    const realtimeHealthy = supabaseRealtimeRecentlyHealthy(now);
-    const orderFallbackDue = !realtimeHealthy || now - realtimeFallbackLastOrderAt > EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS;
-    if (orderFallbackDue) {
-      realtimeFallbackLastOrderAt = now;
-      await loadRecentOrdersFromSupabase({ reason: "poll", silent: true });
-      if (view === "reports") requestActiveReportData(true);
-    }
+  const orderRealtimeHealthy = supabaseRealtimeReasonHealthy("orders", now);
+  const orderFallbackMs = orderRealtimeHealthy
+    ? EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS
+    : EGRESS_SAVER_ORDER_UNHEALTHY_FALLBACK_MS;
+  if (now - realtimeFallbackLastOrderAt > orderFallbackMs) {
+    realtimeFallbackLastOrderAt = now;
+    await requestLiveOrderRefresh({ reason: "poll", silent: true, force: !orderRealtimeHealthy });
+    if (view === "reports") requestActiveReportData(true);
   }
   if (masterViews.has(view) && now - realtimeFallbackLastMasterAt > EGRESS_SAVER_MASTER_FALLBACK_MS) {
     realtimeFallbackLastMasterAt = now;
@@ -2290,6 +2355,41 @@ function nativePushScopeKey() {
     .slice(0, 80) || "default";
 }
 
+function nativePushRegistrationSignature() {
+  const target = nativePushTarget();
+  const kitchenCategories = target === "dapur" ? deviceKitchenNotificationCategories() : [];
+  return JSON.stringify({
+    scopeKey: nativePushScopeKey(),
+    target,
+    enabled: nativePushEnabledForTarget(target),
+    kitchenCategories
+  });
+}
+
+function markNativePushTokenRegistered() {
+  try {
+    localStorage.setItem(NATIVE_PUSH_TOKEN_REGISTERED_KEY, nativePushRegistrationSignature());
+  } catch (error) {
+    console.warn("Native push token registered marker failed", error);
+  }
+}
+
+function clearNativePushTokenRegistered() {
+  try {
+    localStorage.removeItem(NATIVE_PUSH_TOKEN_REGISTERED_KEY);
+  } catch (error) {
+    console.warn("Native push token registered marker clear failed", error);
+  }
+}
+
+function nativePushTokenRegistrationLooksRegistered() {
+  try {
+    return localStorage.getItem(NATIVE_PUSH_TOKEN_REGISTERED_KEY) === nativePushRegistrationSignature();
+  } catch {
+    return false;
+  }
+}
+
 function getNativeFcmToken() {
   const androidBridge = window.KasirinAndroid;
   const nativeBridge = window.KasirinNative;
@@ -2367,7 +2467,10 @@ async function registerNativePushToken(options = {}) {
   const kitchenCategories = target === "dapur" ? deviceKitchenNotificationCategories() : [];
   setNativeKitchenNotificationCategories(kitchenCategories);
   const registerKey = `${session?.user?.id || "native-anon"}|${scopeKey}|${target}|${enabled ? "on" : "off"}|${kitchenCategories.join("\u001f")}|${token}`;
-  if (!options.force && nativePushTokenRegisterKey === registerKey) return true;
+  if (!options.force && nativePushTokenRegisterKey === registerKey) {
+    markNativePushTokenRegistered();
+    return true;
+  }
   nativePushTokenRegistering = true;
   try {
     const { error } = await supabaseClient.functions.invoke("register-device-token", {
@@ -2384,12 +2487,91 @@ async function registerNativePushToken(options = {}) {
     });
     if (error) throw error;
     nativePushTokenRegisterKey = registerKey;
+    markNativePushTokenRegistered();
     return true;
   } catch (error) {
     console.warn("Native push token registration failed", error);
     return false;
   } finally {
     nativePushTokenRegistering = false;
+  }
+}
+
+async function nativePushTokenIsRegistered(token) {
+  if (!token || !canAttemptSupabaseSync()) return false;
+  const target = nativePushTarget();
+  const scopeKey = nativePushScopeKey();
+  const enabled = nativePushEnabledForTarget(target);
+  const expectedCategories = target === "dapur" ? normalizeKitchenNotificationCategories(deviceKitchenNotificationCategories()) : [];
+  try {
+    const rows = await supabaseRestSelect("device_push_tokens", "id,target,scope_key,is_active,kitchen_categories", {
+      fcm_token: `eq.${token}`,
+      target: `eq.${target}`,
+      scope_key: `eq.${scopeKey}`,
+      limit: "1"
+    });
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row || Boolean(row.is_active) !== enabled) return false;
+    if (target !== "dapur") return true;
+    const actualCategories = normalizeKitchenNotificationCategories(row.kitchen_categories);
+    if (actualCategories.length !== expectedCategories.length) return false;
+    const actualKeys = new Set(actualCategories.map(category => category.toLowerCase()));
+    return expectedCategories.every(category => actualKeys.has(category.toLowerCase()));
+  } catch (error) {
+    console.warn("Native push token verification failed", error);
+    return false;
+  }
+}
+
+function updateNativePushTokenButtonState(scope = document) {
+  const button = scope?.querySelector?.(".notification-token-button");
+  if (!button) return;
+  const registered = nativePushTokenRegistrationLooksRegistered();
+  button.classList.toggle("is-registered", registered);
+  button.innerHTML = registered ? "✓ Terdaftar" : "Daftar token";
+}
+
+function handleNotificationSettingsDraftChange(form) {
+  applyNotificationSettings(readNotificationSettingsFromForm(form));
+  updateNativePushTokenButtonState(form);
+}
+
+async function registerDevicePushTokenFromSettings(button) {
+  applyNotificationSettings(readNotificationSettingsFromForm(button));
+  const stopLoading = beginButtonLoading(button, "Mendaftarkan...");
+  if (!stopLoading) return;
+  let confirmed = false;
+  try {
+    if (!isKasirinAndroidWebView()) {
+      toast("Daftar token hanya tersedia di APK.");
+      return;
+    }
+    const token = await getNativeFcmToken();
+    if (!token) {
+      toast("Token notifikasi belum tersedia. Buka ulang aplikasi lalu coba lagi.");
+      return;
+    }
+    const registered = await registerNativePushToken({ reason: "manual-token", force: true });
+    if (!registered) {
+      toast("Token belum berhasil didaftarkan. Periksa koneksi lalu coba lagi.");
+      return;
+    }
+    if (!(await nativePushTokenIsRegistered(token))) {
+      clearNativePushTokenRegistered();
+      toast("Token terkirim, tapi belum terbaca di tabel. Coba tekan lagi.");
+      return;
+    }
+    confirmed = true;
+    toast("Token perangkat terdaftar.");
+  } catch (error) {
+    console.warn("Manual native push token registration failed", error);
+    toast(`Daftar token gagal. ${error.message || "Periksa koneksi."}`);
+  } finally {
+    stopLoading();
+    if (confirmed && button) {
+      button.classList.add("is-registered");
+      button.innerHTML = "✓ Terdaftar";
+    }
   }
 }
 
@@ -5073,14 +5255,38 @@ function liveOrderSyncSince(options = {}) {
   const initialSince = liveOrderInitialSince();
   const lastSyncMs = Date.parse(realtimeOrdersLastSyncedAt || "");
   if (!Number.isFinite(lastSyncMs)) return initialSince;
-  const deltaReasons = new Set(["realtime", "poll", "native-push", "online", "visibility"]);
+  const deltaReasons = new Set([
+    "realtime",
+    "poll",
+    "native-push",
+    "online",
+    "visibility",
+    "navigation",
+    "supabase-ready",
+    "auth-change",
+    "indexeddb-loaded",
+    "indexeddb-migrated",
+    "indexeddb-failed",
+    "localdb-ready",
+    "realtime-unhealthy",
+    "orders-refresh"
+  ]);
   if (!deltaReasons.has(options.reason || "")) return initialSince;
   const deltaSince = new Date(Math.max(Date.parse(initialSince), lastSyncMs - EGRESS_SAVER_DELTA_OVERLAP_MS)).toISOString();
   return deltaSince;
 }
 
 async function loadRecentOrdersFromSupabase(options = {}) {
-  if (!supabaseReadable() || realtimeOrdersLoading || !localDbReady) return;
+  if (!supabaseReadable() || realtimeOrdersLoading) return;
+  if (!localDbReady) {
+    pendingLiveOrderRefreshAfterLocalDbReady = {
+      reason: options.reason || "orders-refresh",
+      force: options.force === true,
+      silent: options.silent !== false,
+      orderIds: options.orderIds
+    };
+    return;
+  }
   const freshEnough = Date.now() - realtimeOrdersLoadedAt < 15000;
   if (!options.force && freshEnough) return;
   realtimeOrdersLoading = true;
@@ -6854,6 +7060,7 @@ function go(id, options = {}) {
   view = id;
   setAppHash(id);
   render();
+  refreshLiveOrdersForCurrentView("navigation");
 }
 
 function openStockPage() {

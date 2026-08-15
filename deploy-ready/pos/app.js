@@ -23,9 +23,10 @@ const OPERATIONAL_CLEANUP_RETENTION_DAYS = 31;
 const OPERATIONAL_CLEANUP_MIN_INTERVAL_HOURS = 20;
 const STALE_REMOTE_ORDER_GRACE_MS = 15 * 60 * 1000;
 const POS_PRODUCT_IMAGE_SIZE = 960;
-const EGRESS_SAVER_POLL_INTERVAL_MS = 60000;
+const EGRESS_SAVER_POLL_INTERVAL_MS = 15000;
 const EGRESS_SAVER_REALTIME_HEALTHY_MS = 2 * 60000;
-const EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS = 3 * 60000;
+const EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS = 2 * 60000;
+const EGRESS_SAVER_ORDER_UNHEALTHY_FALLBACK_MS = 25000;
 const EGRESS_SAVER_MASTER_FALLBACK_MS = 30 * 60000;
 const EGRESS_SAVER_ORDER_LIMIT = 120;
 const EGRESS_SAVER_ORDER_LOOKBACK_HOURS = 30;
@@ -239,9 +240,13 @@ const realtimePendingOrderIds = new Set();
 const realtimePendingOrderItemIds = new Set();
 let deletedOrderSweepLoadedAt = 0;
 let pendingNativePushOrderRefresh = null;
+let pendingLiveOrderRefreshAfterLocalDbReady = null;
 let supabaseRealtimeLastHealthyAt = 0;
+const supabaseRealtimeReasonHealth = {};
 let realtimeFallbackLastOrderAt = 0;
 let realtimeFallbackLastMasterAt = 0;
+const ORDER_LIVE_REFRESH_VIEWS = new Set(["dashboard", "pos", "kitchen", "orders", "reports"]);
+const ORDER_NAVIGATION_REFRESH_STALE_MS = 8000;
 const ORDER_NOTIFICATION_VIEWS = new Set(["kitchen", "orders"]);
 const ORDER_NOTIFICATION_DEDUPE_MS = 12000;
 const ORDER_NOTIFICATION_TONES = {
@@ -452,7 +457,7 @@ window.addEventListener("online", () => {
   loadStoreSettingsFromSupabase({ reason: "online", force: true });
   loadMasterDataFromSupabase({ reason: "online" });
   refreshLimitedStockReservations({ reason: "online", reconcile: true });
-  if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "online", force: true });
+  requestLiveOrderRefresh({ reason: "online", force: true, silent: true });
   scheduleAutomaticOperationalCleanup("online");
   scheduleNativePushTokenRegistration("online", { force: true });
 });
@@ -464,7 +469,7 @@ window.addEventListener("offline", () => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
   scheduleNativePushTokenRegistration("visible", { force: true });
-  if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "visibility", force: true, silent: true });
+  requestLiveOrderRefresh({ reason: "visibility", force: true, silent: true });
 });
 
 setInterval(() => {
@@ -632,12 +637,14 @@ async function initializePersistentState() {
       processSyncQueue("indexeddb-loaded");
       loadStoreSettingsFromSupabase({ reason: "indexeddb-loaded" });
       loadMasterDataFromSupabase({ reason: "indexeddb-loaded" });
+      refreshLiveOrdersAfterLocalDbReady("indexeddb-loaded");
       return;
     }
     saveStateToIndexedDb(persistedStateSnapshot(state));
     processSyncQueue("indexeddb-migrated");
     loadStoreSettingsFromSupabase({ reason: "indexeddb-migrated" });
     loadMasterDataFromSupabase({ reason: "indexeddb-migrated" });
+    refreshLiveOrdersAfterLocalDbReady("indexeddb-migrated");
   } catch (error) {
     localDbReady = true;
     localDbStatus = "IndexedDB gagal, memakai fallback ringkas";
@@ -645,6 +652,7 @@ async function initializePersistentState() {
     render();
     loadStoreSettingsFromSupabase({ reason: "indexeddb-failed" });
     loadMasterDataFromSupabase({ reason: "indexeddb-failed", silent: view === "selforder" });
+    refreshLiveOrdersAfterLocalDbReady("indexeddb-failed");
   }
 }
 
@@ -1751,7 +1759,7 @@ function initSupabase() {
     loadStoreSettingsFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
     loadMasterDataFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
     refreshLimitedStockReservations({ reason: "supabase-ready" });
-    if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "supabase-ready", silent: view === "selforder" });
+    requestLiveOrderRefresh({ reason: "supabase-ready", silent: true });
     scheduleAutomaticOperationalCleanup("supabase-ready");
     scheduleNativePushTokenRegistration("supabase-ready", { force: true });
     if (view === "reports") requestActiveReportData();
@@ -1764,7 +1772,7 @@ function initSupabase() {
     loadStoreSettingsFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
     loadMasterDataFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
     refreshLimitedStockReservations({ reason: "auth-change" });
-    if (!IS_SELF_ORDER_APP) loadRecentOrdersFromSupabase({ reason: "auth-change", force: true, silent: view === "selforder" });
+    requestLiveOrderRefresh({ reason: "auth-change", force: true, silent: true });
     scheduleAutomaticOperationalCleanup("auth-change");
     scheduleNativePushTokenRegistration("auth-change", { force: true });
     if (view === "reports") requestActiveReportData(true);
@@ -1800,16 +1808,73 @@ function setupSupabaseRealtime() {
     });
     return channel.subscribe(status => {
       if (status === "SUBSCRIBED") markSupabaseRealtimeHealthy(reason);
+      if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status)) markSupabaseRealtimeUnhealthy(reason, status);
     });
   });
 }
 
 function markSupabaseRealtimeHealthy(reason = "") {
   supabaseRealtimeLastHealthyAt = Date.now();
+  if (reason) {
+    supabaseRealtimeReasonHealth[reason] = {
+      status: "healthy",
+      lastHealthyAt: supabaseRealtimeLastHealthyAt,
+      lastUnhealthyAt: supabaseRealtimeReasonHealth[reason]?.lastUnhealthyAt || 0,
+      lastStatus: "SUBSCRIBED"
+    };
+  }
 }
 
 function supabaseRealtimeRecentlyHealthy(now = Date.now()) {
   return supabaseRealtimeLastHealthyAt > 0 && now - supabaseRealtimeLastHealthyAt < EGRESS_SAVER_REALTIME_HEALTHY_MS;
+}
+
+function markSupabaseRealtimeUnhealthy(reason = "", status = "UNKNOWN") {
+  if (!reason) return;
+  supabaseRealtimeReasonHealth[reason] = {
+    status: "unhealthy",
+    lastHealthyAt: supabaseRealtimeReasonHealth[reason]?.lastHealthyAt || 0,
+    lastUnhealthyAt: Date.now(),
+    lastStatus: status
+  };
+  if (reason === "orders") {
+    requestLiveOrderRefresh({ reason: "realtime-unhealthy", force: true, silent: true });
+  }
+}
+
+function supabaseRealtimeReasonHealthy(reason = "", now = Date.now()) {
+  const health = supabaseRealtimeReasonHealth[reason];
+  if (!health) return supabaseRealtimeRecentlyHealthy(now);
+  if (health.status === "unhealthy") return false;
+  return Number(health.lastHealthyAt || 0) > 0 && now - Number(health.lastHealthyAt || 0) < EGRESS_SAVER_REALTIME_HEALTHY_MS;
+}
+
+function requestLiveOrderRefresh(options = {}) {
+  if (IS_SELF_ORDER_APP || !supabaseReadable()) return;
+  const refreshOptions = {
+    reason: options.reason || "orders-refresh",
+    force: options.force === true,
+    silent: options.silent !== false,
+    orderIds: options.orderIds
+  };
+  if (!localDbReady) {
+    pendingLiveOrderRefreshAfterLocalDbReady = refreshOptions;
+    return;
+  }
+  return loadRecentOrdersFromSupabase(refreshOptions);
+}
+
+function refreshLiveOrdersAfterLocalDbReady(reason = "localdb-ready") {
+  if (IS_SELF_ORDER_APP || !supabaseReadable()) return;
+  const pending = pendingLiveOrderRefreshAfterLocalDbReady;
+  pendingLiveOrderRefreshAfterLocalDbReady = null;
+  requestLiveOrderRefresh(pending || { reason, force: true, silent: true });
+}
+
+function refreshLiveOrdersForCurrentView(reason = "navigation") {
+  if (IS_SELF_ORDER_APP || !ORDER_LIVE_REFRESH_VIEWS.has(view)) return;
+  const stale = !realtimeOrdersLoadedAt || Date.now() - realtimeOrdersLoadedAt > ORDER_NAVIGATION_REFRESH_STALE_MS;
+  if (stale) requestLiveOrderRefresh({ reason, force: true, silent: true });
 }
 
 function queueRealtimeOrderDelta(table, payload = {}) {
@@ -1897,16 +1962,15 @@ async function pollRealtimeFallback() {
   if (IS_SELF_ORDER_APP) return;
   if (!supabaseReadable() || !localDbReady || navigator.onLine === false) return;
   const now = Date.now();
-  const orderViews = new Set(["dashboard", "pos", "kitchen", "orders", "reports"]);
   const masterViews = new Set(["dashboard", "pos", "kitchen", "orders", "products", "stock", "stock-opname", "selforder", "settings"]);
-  if (orderViews.has(view)) {
-    const realtimeHealthy = supabaseRealtimeRecentlyHealthy(now);
-    const orderFallbackDue = !realtimeHealthy || now - realtimeFallbackLastOrderAt > EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS;
-    if (orderFallbackDue) {
-      realtimeFallbackLastOrderAt = now;
-      await loadRecentOrdersFromSupabase({ reason: "poll", silent: true });
-      if (view === "reports") requestActiveReportData(true);
-    }
+  const orderRealtimeHealthy = supabaseRealtimeReasonHealthy("orders", now);
+  const orderFallbackMs = orderRealtimeHealthy
+    ? EGRESS_SAVER_ORDER_HEALTHY_FALLBACK_MS
+    : EGRESS_SAVER_ORDER_UNHEALTHY_FALLBACK_MS;
+  if (now - realtimeFallbackLastOrderAt > orderFallbackMs) {
+    realtimeFallbackLastOrderAt = now;
+    await requestLiveOrderRefresh({ reason: "poll", silent: true, force: !orderRealtimeHealthy });
+    if (view === "reports") requestActiveReportData(true);
   }
   if (masterViews.has(view) && now - realtimeFallbackLastMasterAt > EGRESS_SAVER_MASTER_FALLBACK_MS) {
     realtimeFallbackLastMasterAt = now;
@@ -5191,14 +5255,38 @@ function liveOrderSyncSince(options = {}) {
   const initialSince = liveOrderInitialSince();
   const lastSyncMs = Date.parse(realtimeOrdersLastSyncedAt || "");
   if (!Number.isFinite(lastSyncMs)) return initialSince;
-  const deltaReasons = new Set(["realtime", "poll", "native-push", "online", "visibility"]);
+  const deltaReasons = new Set([
+    "realtime",
+    "poll",
+    "native-push",
+    "online",
+    "visibility",
+    "navigation",
+    "supabase-ready",
+    "auth-change",
+    "indexeddb-loaded",
+    "indexeddb-migrated",
+    "indexeddb-failed",
+    "localdb-ready",
+    "realtime-unhealthy",
+    "orders-refresh"
+  ]);
   if (!deltaReasons.has(options.reason || "")) return initialSince;
   const deltaSince = new Date(Math.max(Date.parse(initialSince), lastSyncMs - EGRESS_SAVER_DELTA_OVERLAP_MS)).toISOString();
   return deltaSince;
 }
 
 async function loadRecentOrdersFromSupabase(options = {}) {
-  if (!supabaseReadable() || realtimeOrdersLoading || !localDbReady) return;
+  if (!supabaseReadable() || realtimeOrdersLoading) return;
+  if (!localDbReady) {
+    pendingLiveOrderRefreshAfterLocalDbReady = {
+      reason: options.reason || "orders-refresh",
+      force: options.force === true,
+      silent: options.silent !== false,
+      orderIds: options.orderIds
+    };
+    return;
+  }
   const freshEnough = Date.now() - realtimeOrdersLoadedAt < 15000;
   if (!options.force && freshEnough) return;
   realtimeOrdersLoading = true;
@@ -6972,6 +7060,7 @@ function go(id, options = {}) {
   view = id;
   setAppHash(id);
   render();
+  refreshLiveOrdersForCurrentView("navigation");
 }
 
 function openStockPage() {
