@@ -187,6 +187,7 @@ let selfOrderCart = loadSelfOrderCart();
 let selfOrderSubmitting = false;
 let selfOrderSubmitError = "";
 let selfOrderTableChecking = false;
+let moveOrderTableSubmitting = false;
 let kitchenFilter = "Aktif";
 const kitchenPreparedSyncingKeys = new Set();
 const kitchenOptimisticOrderMutations = new Map();
@@ -1096,6 +1097,24 @@ function normalizeSelfOrderTableCode(value) {
   const tableMatch = raw.match(/^([A-Z]{1,3})-?([1-9]\d{0,2})$/);
   if (tableMatch) return `${tableMatch[1]}-${tableMatch[2]}`;
   return "";
+}
+
+function normalizeMoveOrderTableCode(value) {
+  const raw = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/^#/, "")
+    .replace(/^\?/, "")
+    .replace(/^MEJA[\s-]*/i, "")
+    .replace(/^M[\s-]*/i, "")
+    .replace(/\s*-\s*/g, "-")
+    .replace(/\s+/g, "");
+  if (!raw) return "";
+  const numberOnly = raw.match(/^([1-9]\d{0,2})$/)?.[1];
+  if (numberOnly) return numberOnly;
+  const tableMatch = raw.match(/^([A-Z]{1,3})-?([1-9]\d{0,2})$/);
+  if (tableMatch) return `${tableMatch[1]}-${tableMatch[2]}`;
+  return raw;
 }
 
 function cssEscape(value) {
@@ -5522,7 +5541,7 @@ function normalizeSupabaseLiveOrder(orderRow, itemRows = [], addonsByItemId = ne
     if (indexA !== indexB) return indexA - indexB;
     return String(a.id || "").localeCompare(String(b.id || ""));
   }));
-  const items = sortedItemRows.map((item, index) => {
+  const remoteItems = sortedItemRows.map((item, index) => {
     const variantData = item.variant_data || {};
     const matchedProduct = state.products.find(product => {
       const sameSku = item.sku && product.sku === item.sku;
@@ -5549,6 +5568,7 @@ function normalizeSupabaseLiveOrder(orderRow, itemRows = [], addonsByItemId = ne
       addons: addonsByItemId.get(item.id) || []
     };
   });
+  const items = remoteItems.length ? remoteItems : (existing?.items || []);
   const normalizedOrder = {
     ...(existing || {}),
     id: existing?.id || `remote_${orderRow.id}`,
@@ -8894,6 +8914,7 @@ function activeOrderAtTable(table, exceptOrderId = "") {
 }
 
 function closeMoveOrderTableDialog(context = "orders") {
+  setMoveOrderTableSubmitting(false);
   if (context === "selforder") {
     sessionStorage.removeItem("self_order_move_table_inline");
     render();
@@ -8903,6 +8924,17 @@ function closeMoveOrderTableDialog(context = "orders") {
   if (context === "unpaid") {
     openHeldOrders();
   }
+}
+
+function setMoveOrderTableSubmitting(isSubmitting) {
+  moveOrderTableSubmitting = Boolean(isSubmitting);
+  document.querySelectorAll("[data-move-table-submit]").forEach(button => {
+    if (!button.dataset.defaultText) button.dataset.defaultText = button.textContent.trim();
+    button.textContent = moveOrderTableSubmitting ? "Memindahkan..." : button.dataset.defaultText;
+    button.disabled = moveOrderTableSubmitting;
+    if (moveOrderTableSubmitting) button.setAttribute("aria-busy", "true");
+    else button.removeAttribute("aria-busy");
+  });
 }
 
 function moveOrderTableDialogHtml(order, context = "orders") {
@@ -8927,7 +8959,7 @@ function moveOrderTableDialogHtml(order, context = "orders") {
       <p class="move-table-note">Meja tujuan kosong agar pesanan tidak bercampur.</p>
       <div class="toolbar move-table-actions">
         <button class="btn" type="button" onclick='closeMoveOrderTableDialog(${JSON.stringify(context)})'>Batal</button>
-        <button class="btn green" type="button" onclick='confirmMoveOrderTable(${JSON.stringify(order?.id || "")}, ${JSON.stringify(context)})'>Pindahkan</button>
+        <button class="btn green" type="button" data-move-table-submit onclick='confirmMoveOrderTable(${JSON.stringify(order?.id || "")}, ${JSON.stringify(context)})'>Pindahkan</button>
       </div>
     </div>
   `;
@@ -8947,10 +8979,11 @@ function openMoveOrderTableDialog(orderId, context = "orders") {
 }
 
 async function confirmMoveOrderTable(orderId, context = "orders") {
+  if (moveOrderTableSubmitting) return;
   const order = orderById(orderId);
   if (!order) return toast("Pesanan tidak ditemukan.");
   const input = document.getElementById("moveOrderTableInput");
-  const nextTable = normalizeSelfOrderTableCode(input?.value || "");
+  const nextTable = normalizeMoveOrderTableCode(input?.value || "");
   if (!nextTable) {
     input?.classList.add("invalid");
     return toast("Masukkan kode meja yang benar.");
@@ -8959,36 +8992,41 @@ async function confirmMoveOrderTable(orderId, context = "orders") {
     closeMoveOrderTableDialog(context);
     return toast("Meja tidak berubah.");
   }
-  if (supabaseReadable()) {
-    await refreshSelfOrderTableOrders(nextTable, { force: true, silent: true });
-  }
-  const occupied = activeOrderAtTable(nextTable, order.id);
-  if (occupied) {
-    return toast(`Meja ${nextTable} masih punya pesanan aktif.`);
-  }
-  const previousTable = order.serviceInfo || "-";
-  order.serviceInfo = nextTable;
-  order.updatedAt = new Date().toISOString();
-  saveState();
-  const synced = await syncOrderToSupabase(order, { silent: true });
-  if (!synced) {
-    order.serviceInfo = previousTable;
+  setMoveOrderTableSubmitting(true);
+  try {
+    if (supabaseReadable()) {
+      await refreshSelfOrderTableOrders(nextTable, { force: true, silent: true });
+    }
+    const occupied = activeOrderAtTable(nextTable, order.id);
+    if (occupied) {
+      return toast(`Meja ${nextTable} masih punya pesanan aktif.`);
+    }
+    const previousTable = order.serviceInfo || "-";
+    order.serviceInfo = nextTable;
+    order.updatedAt = new Date().toISOString();
     saveState();
-    return toast("Gagal memindahkan meja. Cek koneksi lalu coba lagi.");
+    const synced = await syncOrderToSupabase(order, { silent: true });
+    if (!synced) {
+      order.serviceInfo = previousTable;
+      saveState();
+      return toast("Gagal memindahkan meja. Cek koneksi lalu coba lagi.");
+    }
+    if (context === "selforder") {
+      sessionStorage.setItem("self_order_table", nextTable);
+      saveSelfOrderLastOrderSnapshot(order, orderTotal(order), {
+        table: nextTable,
+        customer: order.customer || "",
+        appended: false,
+        batch: Math.max(1, ...((order.items || []).map(orderItemBatch)))
+      });
+    }
+    audit("Meja pesanan dipindahkan", `${order.number} ${previousTable} ke ${nextTable}`);
+    closeMoveOrderTableDialog(context);
+    toast(`Pesanan dipindahkan ke meja ${nextTable}.`);
+    if (context !== "unpaid") render();
+  } finally {
+    setMoveOrderTableSubmitting(false);
   }
-  if (context === "selforder") {
-    sessionStorage.setItem("self_order_table", nextTable);
-    saveSelfOrderLastOrderSnapshot(order, orderTotal(order), {
-      table: nextTable,
-      customer: order.customer || "",
-      appended: false,
-      batch: Math.max(1, ...((order.items || []).map(orderItemBatch)))
-    });
-  }
-  audit("Meja pesanan dipindahkan", `${order.number} ${previousTable} ke ${nextTable}`);
-  closeMoveOrderTableDialog(context);
-  toast(`Pesanan dipindahkan ke meja ${nextTable}.`);
-  if (context !== "unpaid") render();
 }
 
 function selfOrderActiveCategory() {
@@ -10425,7 +10463,6 @@ function renderSelfOrderSuccess() {
         <h2>Pesanan diterima</h2>
         <p class="self-order-success-warning">Mohon Tidak Pindah Meja</p>
         <p class="self-order-success-warning-hint">(klik tombol dibawah jika pindah meja)</p>
-        <p>Pesanan anda telah kami terima dan akan segera di proses +-20 menit, Terimakasih.</p>
         <div class="self-order-success-detail">
           <span><b>Nomor meja</b><strong>${escapeHtml(order?.table || "A-1")}</strong></span>
           <span><b>Nomor order</b><strong>${escapeHtml(displayOrderNumber(order?.number || "-"))}</strong></span>
@@ -10434,11 +10471,11 @@ function renderSelfOrderSuccess() {
           <span><b>Status bayar</b><strong>Bayar di Kasir saat pulang</strong></span>
           <span><b>Nama pelanggan</b><strong>${customer ? escapeHtml(customer) : "-"}</strong></span>
         </div>
-        <p>Pesanan tambahan dapat dilakukan dengan scan QR Code ulang atau klik tombol dibawah.</p>
+        <p>Pesanan Anda telah kami terima dan akan segera diproses ±20 menit. Untuk pesanan tambahan, silakan scan ulang QR Code atau klik tombol di bawah. Terima kasih!</p>
         <div class="self-order-success-actions">
           <button class="self-order-primary" type="button" onclick="selfOrderShowMenu()">Pesan Lagi</button>
           ${moveInline ? renderSelfOrderSuccessMoveInline(currentTable) : ""}
-          <button class="self-order-secondary" type="button" onclick="${moveInline && liveOrder ? `confirmMoveOrderTable('${liveOrder.id}', 'selforder')` : "openSelfOrderMoveTableDialog()"}" ${hasOrderReference ? "" : "disabled"}>${moveInline ? "Konfirmasi Pindah Meja" : "Pindah Meja"}</button>
+          <button class="self-order-secondary" type="button" ${moveInline ? "data-move-table-submit" : ""} onclick="${moveInline && liveOrder ? `confirmMoveOrderTable('${liveOrder.id}', 'selforder')` : "openSelfOrderMoveTableDialog()"}" ${hasOrderReference ? "" : "disabled"}>${moveInline ? "Konfirmasi Pindah Meja" : "Pindah Meja"}</button>
         </div>
       </section>
     </main>
@@ -10461,6 +10498,18 @@ function renderSelfOrderSuccessMoveInline(currentTable) {
   `;
 }
 
+function focusMoveOrderTableInput({ scroll = false } = {}) {
+  const input = document.getElementById("moveOrderTableInput");
+  if (!input) return;
+  const block = input.closest(".self-order-success-move-inline") || input;
+  if (scroll) block.scrollIntoView({ block: "center", behavior: "smooth" });
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(input.value.length, input.value.length);
+  if (scroll) {
+    setTimeout(() => block.scrollIntoView({ block: "center", behavior: "smooth" }), 260);
+  }
+}
+
 function selfOrderLastLiveOrder() {
   const snapshot = selfOrderLastOrderSnapshot();
   if (!snapshot) return null;
@@ -10476,12 +10525,7 @@ function openSelfOrderMoveTableDialog() {
   if (!canMoveOrderTable(order)) return toast("Pesanan ini tidak bisa dipindahkan meja.");
   sessionStorage.setItem("self_order_move_table_inline", "1");
   render();
-  setTimeout(() => {
-    const input = document.getElementById("moveOrderTableInput");
-    if (!input) return;
-    input.focus({ preventScroll: true });
-    input.setSelectionRange(input.value.length, input.value.length);
-  }, 0);
+  setTimeout(() => focusMoveOrderTableInput({ scroll: true }), 0);
 }
 
 function openSelfOrderHistory() {
