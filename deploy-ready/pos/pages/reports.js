@@ -5,9 +5,7 @@ function productReportQueryTokens(value) {
 }
 
 function productReportSearchText(row) {
-  return [row.name, row.displayName, row.code]
-    .map(value => String(value || "").toLowerCase())
-    .join(" ");
+  return String(row.displayName || row.name || "").toLowerCase();
 }
 
 function productReportMatchesQuery(row, query) {
@@ -33,6 +31,8 @@ function applyProductSalesSearchFilter(value = "") {
     const searchText = String(row.dataset.productSearch || "");
     const matched = !tokens.length || tokens.every(token => searchText.includes(token));
     row.hidden = !matched;
+    row.classList.toggle("is-filtered-out", !matched);
+    row.style.display = matched ? "" : "none";
     if (!matched) return;
     visibleCount += 1;
     productQty += Number(row.dataset.productQty || 0);
@@ -159,7 +159,7 @@ function renderReports() {
     const initials = title.split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join("").toUpperCase() || "PR";
     const visible = productReportMatchesQuery(row, productSearch);
     return `
-      <div class="product-sales-row" data-product-sales-row data-product-search="${escapeHtml(productReportSearchText(row))}" data-product-qty="${Number(row.qty || 0)}" data-product-revenue="${Number(row.value || 0)}" data-product-profit="${Number(row.profit || 0)}" ${visible ? "" : "hidden"}>
+      <div class="product-sales-row ${visible ? "" : "is-filtered-out"}" data-product-sales-row data-product-search="${escapeHtml(productReportSearchText(row))}" data-product-qty="${Number(row.qty || 0)}" data-product-revenue="${Number(row.value || 0)}" data-product-profit="${Number(row.profit || 0)}" ${visible ? "" : "hidden style=\"display:none\""}>
         <span class="product-sales-avatar">${escapeHtml(initials)}</span>
         <div class="product-sales-main">
           <strong>${escapeHtml(title)}</strong>

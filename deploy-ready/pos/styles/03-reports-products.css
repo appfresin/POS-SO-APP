@@ -213,6 +213,11 @@
     rgba(255,255,255,.88);
 }
 
+.product-sales-row[hidden],
+.product-sales-row.is-filtered-out {
+  display: none !important;
+}
+
 .product-sales-row:nth-child(even) {
   background: rgba(79, 176, 138, .08);
 }
