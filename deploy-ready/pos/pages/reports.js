@@ -5,7 +5,7 @@ function productReportQueryTokens(value) {
 }
 
 function productReportSearchText(row) {
-  return [row.name, row.displayName, row.code, row.source, row.periodLabel]
+  return [row.name, row.displayName, row.code]
     .map(value => String(value || "").toLowerCase())
     .join(" ");
 }

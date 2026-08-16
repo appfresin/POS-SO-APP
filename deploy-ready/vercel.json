@@ -42,6 +42,14 @@
     {
       "source": "/self-order/:path*",
       "destination": "/self-order/"
+    },
+    {
+      "source": "/delivery",
+      "destination": "/delivery/"
+    },
+    {
+      "source": "/delivery/:path*",
+      "destination": "/delivery/"
     }
   ]
 }
