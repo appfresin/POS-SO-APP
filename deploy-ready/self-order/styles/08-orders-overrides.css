@@ -4933,6 +4933,22 @@
   cursor: progress;
 }
 
+.view-kitchen .kitchen-prep-item.is-corrected {
+  color: #991b1b;
+}
+
+.view-kitchen .kitchen-prep-item.is-corrected .kitchen-prep-detail span {
+  text-decoration: line-through;
+  color: #991b1b;
+  font-weight: 500;
+}
+
+.view-kitchen .kitchen-prep-check.correction-minus {
+  border-color: #b91c1c;
+  background: #dc2626;
+  color: #fff;
+}
+
 .view-kitchen .kitchen-prep-detail {
   min-width: 0;
   display: grid;
@@ -4956,6 +4972,67 @@
   font-weight: 750;
   line-height: 1.25;
   overflow-wrap: anywhere;
+}
+
+.view-kitchen .kitchen-correction-reason {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.order-correction-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(245, 158, 11, .28);
+  border-radius: 12px;
+  background: #fff7ed;
+  color: #92400e;
+}
+
+.order-correction-banner strong {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.order-correction-banner span {
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.order-correction-actions,
+.correction-dialog-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.order-correction-actions .btn,
+.correction-dialog-actions .btn {
+  min-height: 44px;
+  border-radius: 14px;
+}
+
+.correction-reason-form {
+  display: grid;
+  gap: 12px;
+}
+
+.correction-reason-form textarea.input {
+  min-height: 82px;
+  resize: vertical;
 }
 
 .view-kitchen .kitchen-ready-progress {
@@ -5069,6 +5146,14 @@
   padding: 0 8px;
   border-radius: 999px;
   font-size: 10.5px;
+}
+
+.view-kitchen .kitchen-order-statuses {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .view-kitchen .kitchen-order-meta {
@@ -6042,6 +6127,65 @@
   font-size: 9px;
   font-weight: 850;
   white-space: nowrap;
+}
+
+.orders-card-statuses {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.order-correction-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(185, 28, 28, .18);
+  background: #dc2626;
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 850;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.view-orders .orders-card-head .order-correction-badge,
+.view-kitchen .kitchen-order-head .order-correction-badge {
+  color: #ffffff;
+}
+
+.orders-correction-history {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(245, 158, 11, .42);
+}
+
+.orders-correction-line {
+  color: #b91c1c;
+}
+
+.orders-correction-line b,
+.orders-correction-line strong {
+  color: #b91c1c;
+  text-decoration: line-through;
+}
+
+.orders-correction-reason {
+  display: block;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 500;
+  text-decoration: none;
 }
 
 .view-orders .orders-status-pill.new {
