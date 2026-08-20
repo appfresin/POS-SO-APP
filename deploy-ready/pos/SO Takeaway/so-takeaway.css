@@ -170,11 +170,11 @@
 
 .so-takeaway-statusbar span {
   display: grid;
-  gap: 6px;
+  gap: 5px;
   justify-items: center;
   min-width: 0;
-  min-height: 64px;
-  padding: 12px 6px;
+  min-height: 108px;
+  padding: 12px 8px;
   border-radius: 8px;
   background: #f4f7fb;
   color: #667085;
@@ -202,6 +202,22 @@
 .so-takeaway-statusbar span.active i {
   background: #2f9b76;
   color: #fff;
+}
+
+.so-takeaway-statusbar b {
+  line-height: 1.15;
+}
+
+.so-takeaway-statusbar small {
+  max-width: 100%;
+  color: #667085;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.so-takeaway-statusbar span.active small {
+  color: #356454;
 }
 
 .so-takeaway-statusbar:not(.is-paid):not(.is-expired) span:first-child {
@@ -264,14 +280,19 @@
 
   .so-takeaway-statusbar span {
     gap: 4px;
-    min-height: 58px;
-    padding: 9px 3px;
-    font-size: 0.68rem;
+    min-height: 112px;
+    padding: 9px 4px;
+    font-size: 0.64rem;
   }
 
   .so-takeaway-statusbar i {
     width: 26px;
     height: 26px;
     font-size: 0.78rem;
+  }
+
+  .so-takeaway-statusbar small {
+    font-size: 0.56rem;
+    line-height: 1.2;
   }
 }

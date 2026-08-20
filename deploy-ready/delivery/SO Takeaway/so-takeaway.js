@@ -118,6 +118,11 @@
     );
   }
 
+  function soTakeawayIsCompleted(order) {
+    const status = String(order?.status || "").trim();
+    return Boolean(status === "Selesai" || order?.completedAt);
+  }
+
   function soTakeawayStatusLabel(order) {
     if (soTakeawayIsExpired(order)) return "KEDALUWARSA";
     if (soTakeawayIsPaid(order)) return "DIBAYAR";
@@ -216,7 +221,7 @@
     const snapshot = soTakeawayLastSnapshot();
     if (!snapshot) return false;
     const order = soTakeawayFindOrder(snapshot);
-    return !order || (!soTakeawayIsExpired(order) && !soTakeawayKitchenAccepted(order));
+    return !order || (!soTakeawayIsExpired(order) && !soTakeawayIsCompleted(order));
   }
 
   async function soTakeawayRefreshActiveOrderFromSupabase(options = {}) {
@@ -272,7 +277,7 @@
       );
       mergeSupabaseLiveOrders([liveOrder]);
       saveState();
-      if (soTakeawayIsPaid(liveOrder) || soTakeawayKitchenAccepted(liveOrder)) render();
+      if (soTakeawayIsPaid(liveOrder) || soTakeawayKitchenAccepted(liveOrder) || soTakeawayIsCompleted(liveOrder)) render();
       return true;
     } catch (error) {
       console.warn("Takeaway status refresh failed", error);
@@ -340,24 +345,25 @@
     soTakeawayStartNewOrder(event);
   }
 
-  function soTakeawayStatusBar({ paid = false, expired = false, processing = false } = {}) {
+  function soTakeawayStatusBar({ paid = false, expired = false, processing = false, completed = false } = {}) {
     const steps = expired
       ? [
-        ["expired", "Kedaluwarsa", true],
-        ["payment", "Pembayaran", false],
-        ["process", "Diproses", false]
+        ["expired", "Kedaluwarsa", "Waktu pembayaran sudah habis.", true, "!"],
+        ["payment", "Pembayaran", "Silakan buat pesanan baru.", false, "2"],
+        ["process", "Proses", "Pesanan belum diproses.", false, "3"]
       ]
       : [
-        ["waiting", "Menunggu pembayaran", true],
-        ["paid", "Pembayaran diterima", paid],
-        ["process", "Diproses", processing]
+        ["payment", paid ? "Pembayaran diterima" : "Menunggu pembayaran", paid ? "Kasir sudah menerima pembayaran." : "Tunjukkan halaman ini ke kasir untuk membayar.", true, paid ? "&#10003;" : "1"],
+        ["process", processing ? "Diproses" : "Menunggu diproses", processing ? "Pesanan sedang disiapkan." : "Pesanan masuk antrean setelah pembayaran diterima.", paid, processing ? "&#10003;" : "2"],
+        ["done", "Selesai", completed ? "Pesanan sudah selesai." : "Tunggu sampai pesanan siap diambil.", completed, completed ? "&#10003;" : "3"]
       ];
     return `
-      <div class="so-takeaway-statusbar ${paid ? "is-paid" : ""} ${processing ? "is-processing" : ""} ${expired ? "is-expired" : ""}" aria-label="Status pesanan">
-        ${steps.map(([id, label, active], index) => `
+      <div class="so-takeaway-statusbar ${paid ? "is-paid" : ""} ${processing ? "is-processing" : ""} ${completed ? "is-completed" : ""} ${expired ? "is-expired" : ""}" aria-label="Status pesanan">
+        ${steps.map(([id, label, description, active, icon]) => `
           <span class="${active ? "active" : ""}" data-step="${soTakeawayEscape(id)}">
-            <i aria-hidden="true">${active && (id === "paid" || id === "process") ? "&#10003;" : index + 1}</i>
+            <i aria-hidden="true">${icon}</i>
             <b>${soTakeawayEscape(label)}</b>
+            <small>${soTakeawayEscape(description)}</small>
           </span>
         `).join("")}
       </div>
@@ -434,6 +440,7 @@
     const paid = soTakeawayIsPaid(order) || String(order.status || snapshot.status || "") === "PAID";
     const expired = soTakeawayIsExpired(order) || String(order.status || snapshot.status || "") === "EXPIRED";
     const processing = soTakeawayKitchenAccepted(order);
+    const completed = soTakeawayIsCompleted(order);
     const number = String(soTakeawayNumber(order) || snapshot.takeawayNumber || snapshot.number || "-").trim();
     const customer = String(order.customer || snapshot.customer || "").trim();
     const total = liveOrder ? orderTotal(liveOrder) : Number(snapshot.checkoutTotal ?? snapshot.total ?? 0);
@@ -452,7 +459,7 @@
       : paid
         ? ""
         : "Tunjukkan halaman ini kepada kasir dalam melakukan pembayaran sebelum masa bayar habis.";
-    const statusText = expired ? "Kedaluwarsa" : processing ? "Diproses Dapur" : paid ? "Pembayaran Diterima" : "Menunggu Pembayaran";
+    const statusText = expired ? "Kedaluwarsa" : completed ? "Selesai" : processing ? "Diproses Dapur" : paid ? "Pembayaran Diterima" : "Menunggu Pembayaran";
     return `
       <main class="self-order-main success so-takeaway-success">
         <section class="self-order-success-card so-takeaway-status-card ${paid ? "is-paid" : "is-pending"} ${expired ? "is-expired" : ""}">
@@ -461,8 +468,8 @@
           ${note ? `<p>${soTakeawayEscape(note)}</p>` : ""}
           ${instruction ? `<p class="so-takeaway-cashier-note">${soTakeawayEscape(instruction)}</p>` : ""}
           ${soTakeawayDetailHtml({ number, customer, total, statusText, order })}
-          ${soTakeawayStatusBar({ paid, expired, processing })}
-          ${expired ? `<button class="self-order-primary so-takeaway-new-order-btn" type="button" data-so-takeaway-new-order="1" onclick="window.SOTakeaway.newOrder(event)">Buat Pesanan Baru</button>` : ""}
+          ${soTakeawayStatusBar({ paid, expired, processing, completed })}
+          <button class="self-order-primary so-takeaway-new-order-btn" type="button" data-so-takeaway-new-order="1" onclick="window.SOTakeaway.newOrder(event)">Pesan Lagi</button>
         </section>
       </main>
     `;

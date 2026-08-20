@@ -5410,6 +5410,32 @@ function mergePreparedItems(remotePrepared = {}, localPrepared = {}) {
   return merged;
 }
 
+function sanitizeKitchenPreparedItems(order) {
+  if (!order?.preparedItems || typeof order.preparedItems !== "object") return order;
+  const prepared = { ...(order.preparedItems || {}) };
+  const activeBatches = new Set((order.items || [])
+    .map(item => Number(orderItemBatch(item)))
+    .filter(batch => Number.isFinite(batch) && batch > 0));
+  const lockedBatches = (Array.isArray(prepared.__lockedBatches) ? prepared.__lockedBatches : [])
+    .map(batch => Number(batch))
+    .filter(batch => Number.isFinite(batch) && batch > 0 && activeBatches.has(batch));
+  const locksEveryVisibleBatch = activeBatches.size > 0
+    && lockedBatches.length >= activeBatches.size
+    && [...activeBatches].every(batch => lockedBatches.includes(batch));
+  if (order.status !== "Selesai" && locksEveryVisibleBatch) {
+    delete prepared.__lockedBatches;
+    order.lockedPreparedBatches = [];
+  } else if (lockedBatches.length) {
+    prepared.__lockedBatches = [...new Set(lockedBatches)].sort((a, b) => a - b);
+    order.lockedPreparedBatches = prepared.__lockedBatches;
+  } else {
+    delete prepared.__lockedBatches;
+    order.lockedPreparedBatches = [];
+  }
+  order.preparedItems = prepared;
+  return order;
+}
+
 function kitchenOptimisticOrderKeys(order = {}) {
   return [
     order?.id,
@@ -5490,7 +5516,7 @@ function applyPendingKitchenOrderMutation(remoteOrder, existingOrder = null) {
     || kitchenOptimisticOrderMutation(remoteOrder)
     || (existing && orderHasPendingLocalOrKitchenSync(existing) ? existing : null);
   if (!source) return remoteOrder;
-  return {
+  return sanitizeKitchenPreparedItems({
     ...remoteOrder,
     status: source.status || remoteOrder.status,
     preparedAt: source.preparedAt ?? remoteOrder.preparedAt,
@@ -5500,7 +5526,7 @@ function applyPendingKitchenOrderMutation(remoteOrder, existingOrder = null) {
     syncStatus: source.syncStatus || remoteOrder.syncStatus,
     syncError: source.syncError || remoteOrder.syncError,
     updatedAt: source.updatedAt || remoteOrder.updatedAt
-  };
+  });
 }
 
 function supabaseOrderItemDedupeKey(item = {}) {
@@ -5606,7 +5632,7 @@ function normalizeSupabaseLiveOrder(orderRow, itemRows = [], addonsByItemId = ne
     syncStatus: "synced",
     syncError: ""
   };
-  return applyPendingKitchenOrderMutation(normalizedOrder, existing);
+  return sanitizeKitchenPreparedItems(applyPendingKitchenOrderMutation(normalizedOrder, existing));
 }
 
 function orderLiveTimestamp(value) {
@@ -12600,7 +12626,10 @@ function advanceOrder(id) {
   order.status = next[0];
   order[next[1]] = new Date().toISOString();
   if (wasNewOrder && !isNewOrderStatus(order)) cancelNativeOrderReminder(order);
-  if (order.status === "Sedang Disiapkan") order.preparedItems ||= {};
+  if (order.status === "Sedang Disiapkan") {
+    order.preparedItems ||= {};
+    sanitizeKitchenPreparedItems(order);
+  }
   if (order.status === "Selesai") lockKitchenPreparedBatches(order);
   audit("Status pesanan diubah", `${order.number} menjadi ${order.status}`);
   setKitchenOptimisticOrderMutation(order, {
